@@ -9,7 +9,14 @@ import { createClient } from '@supabase/supabase-js';
 const SITE_ID = '5751fd2b90975b60e048929a';
 const DINE_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Accept': 'application/json',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Referer': 'https://dineoncampus.com/',
+  'Origin': 'https://dineoncampus.com',
+  'sec-fetch-dest': 'empty',
+  'sec-fetch-mode': 'cors',
+  'sec-fetch-site': 'same-site',
 };
 
 export default async function handler(req, res) {
