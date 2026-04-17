@@ -1,20 +1,39 @@
 name: Daily Menu Scrape
 
-# Triggers the Vercel scrape endpoint which runs from Vercel's IPs (not blocked by DineOnCampus).
-# Vercel also has its own cron at 0 8 * * * as a backup (vercel.json).
+# DineOnCampus posts the next day's menus around 11 PM–midnight ET.
+# We run twice:
+#   1. 5:00 AM UTC = midnight/1 AM ET  → primary scrape, catches menus posted overnight
+#   2. 7:00 AM UTC = 2-3 AM ET         → backup before breakfast
 
 on:
   schedule:
-    - cron: '0 5 * * *'    # midnight ET — primary
-    - cron: '0 7 * * *'    # 2-3 AM ET  — backup before breakfast
+    - cron: '0 5 * * *'
+    - cron: '0 7 * * *'
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    defaults:
+      run:
+        working-directory: backend-folder
+
     steps:
-      - name: Trigger Vercel scrape
-        run: |
-          curl -f -X POST https://nu-dining.vercel.app/api/scrape \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json"
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend-folder/package-lock.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run menu scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node run-scrape.js

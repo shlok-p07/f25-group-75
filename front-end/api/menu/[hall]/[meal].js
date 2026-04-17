@@ -5,15 +5,17 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+const HALL_KEYWORD = {
+  'stetson-east':          'Stetson',
+  'steast':                'Stetson',
+  'international-village': 'International',
+  'iv':                    'International',
+  '60-belvidere':          'Belvidere',
+  'belvidere':             'Belvidere',
+};
+
 function mapHall(slug) {
-  return {
-    'stetson-east': 'The Eatery at Stetson East',
-    'steast':       'The Eatery at Stetson East',
-    'international-village': 'United Table at International Village',
-    'iv':           'United Table at International Village',
-    '60-belvidere': 'Campus Roots at 60 Belvidere',
-    'belvidere':    'Campus Roots at 60 Belvidere',
-  }[slug.toLowerCase()] ?? slug;
+  return HALL_KEYWORD[slug.toLowerCase()] ?? slug;
 }
 
 function mapMeal(slug) {
@@ -29,8 +31,9 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   const { hall, meal } = req.query;
-  const locationName = mapHall(hall);
+  const locationKeyword = mapHall(hall);
   const periodName = mapMeal(meal);
+  const locationPattern = `%${locationKeyword}%`;
 
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   let dateToUse = today;
@@ -39,7 +42,7 @@ export default async function handler(req, res) {
   let { data: locations, error: locErr } = await supabase
     .from('locations')
     .select('id, name, date')
-    .eq('name', locationName)
+    .ilike('name', locationPattern)
     .eq('date', today);
 
   if (locErr) return res.status(500).json({ error: locErr.message });
@@ -49,7 +52,7 @@ export default async function handler(req, res) {
     const { data: latest } = await supabase
       .from('locations')
       .select('id, name, date')
-      .eq('name', locationName)
+      .ilike('name', locationPattern)
       .order('date', { ascending: false })
       .limit(10);
     if (latest && latest.length > 0) {
@@ -70,7 +73,7 @@ export default async function handler(req, res) {
       const { data: prevLocs } = await supabase
         .from('locations')
         .select('id, name, date')
-        .eq('name', locationName)
+        .ilike('name', locationPattern)
         .neq('date', today)
         .order('date', { ascending: false })
         .limit(10);
@@ -84,7 +87,7 @@ export default async function handler(req, res) {
   if (!locations || locations.length === 0) {
     return res.status(404).json({
       error: 'No menu data found',
-      message: `No data found for ${locationName}. The database may need to be populated — run /api/scrape.`,
+      message: `No data found for ${locationKeyword}. The database may need to be populated — run /api/scrape.`,
     });
   }
 
