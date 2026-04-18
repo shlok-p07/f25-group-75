@@ -53,6 +53,7 @@ export default async function handler(req, res) {
       .from('locations')
       .select('id, name, date')
       .ilike('name', locationPattern)
+      .lt('date', today)
       .order('date', { ascending: false })
       .limit(10);
     if (latest && latest.length > 0) {
@@ -74,7 +75,7 @@ export default async function handler(req, res) {
         .from('locations')
         .select('id, name, date')
         .ilike('name', locationPattern)
-        .neq('date', today)
+        .lt('date', today)
         .order('date', { ascending: false })
         .limit(10);
       if (prevLocs && prevLocs.length > 0) {
