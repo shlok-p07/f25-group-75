@@ -2,11 +2,15 @@
  * Populate today's menu data including nutrients and dietary filters.
  *
  *   cd backend-folder
- *   node run-scrape.js
+ *   node run-scrape.js           # normal run
+ *   node run-scrape.js --force   # clear today's data and re-scrape
  *
- * Loads the DineOnCampus page via Puppeteer to establish a Cloudflare session,
- * then uses page.evaluate(fetch) for all API calls so cookies are sent automatically.
- * A second per-period call to apiv4.dineoncampus.com fetches nutrients + filters.
+ * Strategy:
+ *  1. Intercept the `todays_menu` response the Angular app fires on page load
+ *     (proven to bypass Cloudflare — the browser makes the call naturally).
+ *  2. For each period, navigate a new tab directly to the apiv4 detail URL.
+ *     A real browser navigation passes Cloudflare; we read body.innerText as JSON.
+ *     This gets us nutrients + dietary filters that the basic endpoint omits.
  */
 require('dotenv').config();
 const puppeteer = require('puppeteer');
@@ -22,7 +26,6 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const SITE_ID = '5751fd2b90975b60e048929a';
 const ALLOWED_HALLS = ['Stetson', 'International', 'Belvidere'];
 
 const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -30,7 +33,6 @@ const force = process.argv.includes('--force');
 console.log(`Scraping menu data for ${today}...\n`);
 
 async function clearToday() {
-  // Delete in dependency order (nutrients → items → stations → periods → locations)
   const { data: items } = await supabase.from('menu_items').select('id').eq('date', today);
   if (items?.length) {
     await supabase.from('nutrients').delete().in('menu_item_id', items.map(i => i.id));
@@ -42,16 +44,19 @@ async function clearToday() {
   console.log('Cleared existing data for today.\n');
 }
 
-async function fetchViaPage(page, url) {
-  return page.evaluate(async (u) => {
-    try {
-      const res = await fetch(u);
-      if (!res.ok) return null;
-      return res.json();
-    } catch {
-      return null;
-    }
-  }, url);
+// Navigate a dedicated tab to a JSON API URL and parse body text as JSON.
+// Real browser navigation passes Cloudflare challenges that fetch() cannot.
+async function fetchViaNavigation(browser, url) {
+  const page = await browser.newPage();
+  try {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    const text = await page.evaluate(() => document.body.innerText);
+    return JSON.parse(text.trim());
+  } catch {
+    return null;
+  } finally {
+    await page.close();
+  }
 }
 
 async function main() {
@@ -70,32 +75,44 @@ async function main() {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
 
+  let siteData;
   try {
     const page = await browser.newPage();
     await page.setUserAgent(
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     );
 
-    console.log('Loading DineOnCampus to establish session...');
-    await page.goto('https://dineoncampus.com/northeastern/whats-on-the-menu', {
-      waitUntil: 'networkidle2',
-      timeout: 60000,
-    });
-
-    console.log('Fetching locations...');
-    const locationsData = await fetchViaPage(page,
-      `https://api.dineoncampus.com/v1/sites/${SITE_ID}/locations?date=${today}`
+    // Intercept the todays_menu response the Angular app fetches automatically on load
+    const menuPromise = page.waitForResponse(
+      r => r.url().includes('todays_menu'),
+      { timeout: 60000 }
     );
+    page.goto('https://dineoncampus.com/northeastern/whats-on-the-menu', {
+      waitUntil: 'load',
+      timeout: 60000,
+    }).catch(() => {});
 
-    if (!locationsData?.locations?.length) {
-      console.error('No locations returned:', JSON.stringify(locationsData));
-      process.exit(1);
-    }
+    console.log('Waiting for menu data from DineOnCampus...');
+    const menuResponse = await menuPromise;
+    siteData = await menuResponse.json();
+    await page.close();
+  } catch (err) {
+    console.error('Failed to intercept menu data:', err.message);
+    await browser.close();
+    process.exit(1);
+  }
 
-    let totalItems = 0;
-    const errors = [];
+  if (!siteData?.locations?.length) {
+    console.error('No locations in response:', JSON.stringify(siteData));
+    await browser.close();
+    process.exit(1);
+  }
 
-    for (const loc of locationsData.locations) {
+  let totalItems = 0;
+  const errors = [];
+
+  try {
+    for (const loc of siteData.locations) {
       if (!ALLOWED_HALLS.some(n => loc.name?.includes(n))) continue;
       console.log(`\n→ ${loc.name}`);
 
@@ -116,8 +133,8 @@ async function main() {
 
         if (perInsErr) { errors.push(`period ${period.name}: ${perInsErr.message}`); continue; }
 
-        // Fetch detailed data (nutrients + dietary filters) for this period
-        const detailed = await fetchViaPage(page,
+        // Navigate directly to the detail API URL — real browser navigation bypasses Cloudflare
+        const detailed = await fetchViaNavigation(browser,
           `https://apiv4.dineoncampus.com/locations/${loc.id}/menu?date=${today}&period=${period.id}`
         );
 
@@ -147,14 +164,14 @@ async function main() {
             const { data: dbItem, error: itemInsErr } = await supabase
               .from('menu_items')
               .insert({
-                station_id:   dbStation.id,
-                original_id:  d?.id ?? null,
-                name:         item.name,
-                calories:     item.calories ?? null,
-                portion:      item.portion ?? null,
-                date:         today,
-                is_vegetarian: isVegetarian,
-                is_vegan:      isVegan,
+                station_id:      dbStation.id,
+                original_id:     d?.id ?? null,
+                name:            item.name,
+                calories:        item.calories ?? null,
+                portion:         item.portion ?? null,
+                date:            today,
+                is_vegetarian:   isVegetarian,
+                is_vegan:        isVegan,
                 is_high_protein: isHighProtein,
               })
               .select().single();
@@ -179,15 +196,15 @@ async function main() {
         }
       }
     }
-
-    await supabase.from('steast_vs_iv')
-      .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
-
-    if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.join('\n'));
-    console.log(`\nDone! Inserted ${totalItems} menu items for ${today}.`);
   } finally {
     await browser.close();
   }
+
+  await supabase.from('steast_vs_iv')
+    .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
+
+  if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.join('\n'));
+  console.log(`\nDone! Inserted ${totalItems} menu items for ${today}.`);
 }
 
 main().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
