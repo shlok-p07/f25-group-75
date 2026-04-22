@@ -26,7 +26,21 @@ const SITE_ID = '5751fd2b90975b60e048929a';
 const ALLOWED_HALLS = ['Stetson', 'International', 'Belvidere'];
 
 const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const force = process.argv.includes('--force');
 console.log(`Scraping menu data for ${today}...\n`);
+
+async function clearToday() {
+  // Delete in dependency order (nutrients → items → stations → periods → locations)
+  const { data: items } = await supabase.from('menu_items').select('id').eq('date', today);
+  if (items?.length) {
+    await supabase.from('nutrients').delete().in('menu_item_id', items.map(i => i.id));
+  }
+  await supabase.from('menu_items').delete().eq('date', today);
+  await supabase.from('stations').delete().eq('date', today);
+  await supabase.from('periods').delete().eq('date', today);
+  await supabase.from('locations').delete().eq('date', today);
+  console.log('Cleared existing data for today.\n');
+}
 
 async function fetchViaPage(page, url) {
   return page.evaluate(async (u) => {
@@ -44,8 +58,11 @@ async function main() {
   const { data: existing } = await supabase
     .from('menu_items').select('id').eq('date', today).limit(1);
   if (existing && existing.length > 0) {
-    console.log(`Menu data already exists for ${today}. Nothing to do.`);
-    return;
+    if (!force) {
+      console.log(`Menu data already exists for ${today}. Use --force to re-scrape.`);
+      return;
+    }
+    await clearToday();
   }
 
   const browser = await puppeteer.launch({
