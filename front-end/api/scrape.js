@@ -6,6 +6,12 @@
 
 import { createClient } from '@supabase/supabase-js';
 
+function parseNumeric(v) {
+  if (v == null || v === '-' || v === '') return null;
+  const n = parseFloat(String(v).replace('+', ''));
+  return isNaN(n) ? null : n;
+}
+
 const SITE_ID = '5751fd2b90975b60e048929a';
 const DINE_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -165,7 +171,7 @@ export default async function handler(req, res) {
               name: n.name,
               value: n.value,
               uom: n.uom,
-              value_numeric: n.valueNumeric ?? null,
+              value_numeric: parseNumeric(n.valueNumeric),
             }));
             const { error: nutErr } = await supabase.from('nutrients').insert(nutrients);
             if (nutErr) errors.push(`nutrients for ${item.name}: ${nutErr.message}`);
