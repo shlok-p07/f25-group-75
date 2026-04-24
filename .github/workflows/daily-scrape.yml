@@ -1,32 +1,39 @@
 name: Daily Menu Scrape
 
 # DineOnCampus posts the next day's menus around 11 PM–midnight ET.
-# Trigger the Vercel /api/scrape endpoint directly — Vercel's serverless environment
-# handles the DineOnCampus API calls reliably without Puppeteer.
-# The Vercel cron (vercel.json) also fires at 8 AM UTC as a backup.
+# Runs the Puppeteer scraper directly (bypasses Cloudflare via stealth plugin).
+# The Vercel cron (vercel.json) also fires at 8 AM UTC as a backup for simple days.
 
 on:
   schedule:
-    - cron: '0 5 * * *'   # midnight/1 AM ET — primary scrape
-    - cron: '0 7 * * *'   # 2-3 AM ET        — backup before breakfast
+    - cron: '0 5 * * *'   # 1 AM ET  — primary scrape
+    - cron: '0 7 * * *'   # 3 AM ET  — backup before breakfast
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Vercel scrape endpoint
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: backend-folder
+
+      - name: Run scraper
         run: |
-          echo "Triggering scrape for $(TZ=America/New_York date '+%Y-%m-%d')..."
-          HTTP_STATUS=$(curl -s -o /tmp/response.json -w "%{http_code}" \
-            -X POST "${{ secrets.VERCEL_APP_URL }}/api/scrape" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            --max-time 120)
-          cat /tmp/response.json
-          echo ""
-          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
-            echo "Scrape completed successfully (HTTP $HTTP_STATUS)"
-          else
-            echo "Scrape failed with HTTP $HTTP_STATUS"
-            exit 1
-          fi
+          echo "Scraping menu for $(TZ=America/New_York date '+%Y-%m-%d')..."
+          node run-scrape.js
+        working-directory: backend-folder
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
