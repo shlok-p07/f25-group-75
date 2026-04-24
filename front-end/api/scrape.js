@@ -1,7 +1,7 @@
 /**
  * Vercel Cron Handler — runs daily at 8 AM UTC (3-4 AM ET)
- * Fetches today's menu from the DineOnCampus public API and upserts into Supabase.
- * No Puppeteer / Chrome needed — plain fetch calls.
+ * Fetches today's menu from apiv4.dineoncampus.com and upserts into Supabase.
+ * Uses apiv4 (not api.dineoncampus.com/v1 which is Cloudflare-blocked from serverless).
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -12,12 +12,12 @@ function parseNumeric(v) {
   return isNaN(n) ? null : n;
 }
 
-const SITE_ID = '5751fd2b90975b60e048929a';
+const ALLOWED_HALLS = ['Stetson', 'International', 'Belvidere'];
+
 const DINE_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
   'Referer': 'https://dineoncampus.com/',
   'Origin': 'https://dineoncampus.com',
   'sec-fetch-dest': 'empty',
@@ -25,9 +25,17 @@ const DINE_HEADERS = {
   'sec-fetch-site': 'same-site',
 };
 
+async function apiv4Get(url) {
+  const res = await fetch(url, { headers: DINE_HEADERS });
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+  const text = await res.text();
+  if (!text.trim().startsWith('{') && !text.trim().startsWith('[')) {
+    throw new Error(`Non-JSON from ${url}: ${text.slice(0, 120)}`);
+  }
+  return JSON.parse(text);
+}
+
 export default async function handler(req, res) {
-  // Vercel sends Authorization: Bearer <CRON_SECRET> for cron invocations.
-  // Also allow manual POST with the same header for testing.
   const authHeader = req.headers.authorization ?? '';
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
@@ -42,135 +50,101 @@ export default async function handler(req, res) {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   console.log(`[scrape] Starting scrape for ${today}`);
 
-  // Skip if data already exists for today
   const { data: existing } = await supabase
-    .from('menu_items')
-    .select('id')
-    .eq('date', today)
-    .limit(1);
+    .from('menu_items').select('id').eq('date', today).limit(1);
 
-  if (existing && existing.length > 0) {
+  if (existing?.length) {
     console.log(`[scrape] Data already exists for ${today}, skipping.`);
     return res.json({ message: `Menu data already exists for ${today}`, skipped: true });
   }
 
-  // 1. Fetch top-level locations (with periods + stations + basic items)
-  let locationsData;
+  let locations;
   try {
-    const locRes = await fetch(
-      `https://api.dineoncampus.com/v1/sites/${SITE_ID}/locations?date=${today}`,
-      { headers: DINE_HEADERS }
-    );
-    if (!locRes.ok) throw new Error(`Locations API ${locRes.status}`);
-    locationsData = await locRes.json();
+    const data = await apiv4Get('https://apiv4.dineoncampus.com/sites/todays_menu');
+    locations = data?.locations;
   } catch (err) {
-    console.error('[scrape] Failed to fetch locations:', err.message);
-    // Try without date param as fallback
-    try {
-      const locRes2 = await fetch(
-        `https://api.dineoncampus.com/v1/sites/${SITE_ID}/locations`,
-        { headers: DINE_HEADERS }
-      );
-      locationsData = await locRes2.json();
-    } catch (err2) {
-      return res.status(502).json({ error: 'Failed to reach DineOnCampus API', detail: err2.message });
-    }
+    console.error('[scrape] Failed to fetch todays_menu:', err.message);
+    return res.status(502).json({ error: 'Failed to reach DineOnCampus API', detail: err.message });
   }
 
-  if (!locationsData?.locations?.length) {
-    return res.status(404).json({ error: 'DineOnCampus returned no locations', raw: locationsData });
+  if (!locations?.length) {
+    return res.status(404).json({ error: 'DineOnCampus returned no locations' });
   }
 
   let totalItems = 0;
   const errors = [];
 
-  for (const loc of locationsData.locations) {
-    // Only process the 3 main halls
-    const allowedNames = ['Stetson East', 'International Village', '60 Belvidere'];
-    if (!allowedNames.some(n => loc.name?.includes(n.split(' ')[0]))) continue;
+  for (const loc of locations) {
+    if (!ALLOWED_HALLS.some(n => loc.name?.includes(n))) continue;
+    console.log(`[scrape] Processing: ${loc.name}`);
 
-    console.log(`[scrape] Processing location: ${loc.name}`);
-
-    // Insert location
     const { data: dbLoc, error: locInsErr } = await supabase
       .from('locations')
-      .insert({ original_id: loc.id, name: loc.name, type: loc.type, building_name: loc.building_name, sort_order: loc.sort_order, date: today })
-      .select()
-      .single();
+      .insert({ original_id: loc.id, name: loc.name, date: today })
+      .select().single();
 
     if (locInsErr) { errors.push(`location ${loc.name}: ${locInsErr.message}`); continue; }
 
     for (const period of (loc.periods ?? [])) {
+      if (period.name === 'Everyday') continue;
+
       const { data: dbPeriod, error: perInsErr } = await supabase
         .from('periods')
         .insert({ original_id: period.id, location_id: dbLoc.id, name: period.name, date: today })
-        .select()
-        .single();
+        .select().single();
 
       if (perInsErr) { errors.push(`period ${period.name}: ${perInsErr.message}`); continue; }
 
-      // 2. Fetch detailed menu for this period (nutrients + filters)
-      let detailed = null;
+      let menuData = null;
       try {
-        const detailRes = await fetch(
-          `https://apiv4.dineoncampus.com/locations/${loc.id}/menu?date=${today}&period=${period.id}`,
-          { headers: DINE_HEADERS }
+        menuData = await apiv4Get(
+          `https://apiv4.dineoncampus.com/locations/${loc.id}/menu?date=${today}&period=${period.id}`
         );
-        if (detailRes.ok) detailed = await detailRes.json();
       } catch (e) {
-        console.warn(`[scrape] Could not fetch details for period ${period.id}:`, e.message);
+        console.warn(`[scrape] Could not fetch menu for period ${period.id}:`, e.message);
       }
 
-      // Build name → detailed item map
-      const detailMap = new Map();
-      if (detailed?.period?.categories) {
-        for (const cat of detailed.period.categories) {
-          for (const item of (cat.items ?? [])) {
-            detailMap.set(item.name, item);
-          }
-        }
+      if (!menuData?.period?.categories?.length) {
+        console.log(`[scrape]   ${period.name}: no categories`);
+        continue;
       }
 
-      for (const station of (period.stations ?? [])) {
+      for (const category of menuData.period.categories) {
         const { data: dbStation, error: stInsErr } = await supabase
           .from('stations')
-          .insert({ original_id: station.id, period_id: dbPeriod.id, name: station.name, date: today })
-          .select()
-          .single();
+          .insert({ original_id: category.id ?? null, period_id: dbPeriod.id, name: category.name, date: today })
+          .select().single();
 
-        if (stInsErr) { errors.push(`station ${station.name}: ${stInsErr.message}`); continue; }
+        if (stInsErr) { errors.push(`station ${category.name}: ${stInsErr.message}`); continue; }
 
-        for (const item of (station.items ?? [])) {
-          const d = detailMap.get(item.name);
-          const isVegan = d?.filters?.some(f => f.name === 'Vegan') ?? false;
-          const isVegetarian = d?.filters?.some(f => f.name === 'Vegetarian' || f.name === 'Vegan') ?? false;
-          const isHighProtein = d?.filters?.some(f => f.name === 'Good Source of Protein') ?? false;
+        for (const item of (category.items ?? [])) {
+          const isVegan       = item.filters?.some(f => f.name === 'Vegan') ?? false;
+          const isVegetarian  = item.filters?.some(f => f.name === 'Vegetarian' || f.name === 'Vegan') ?? false;
+          const isHighProtein = item.filters?.some(f => f.name === 'Good Source of Protein') ?? false;
 
           const { data: dbItem, error: itemInsErr } = await supabase
             .from('menu_items')
             .insert({
-              station_id: dbStation.id,
-              original_id: d?.id ?? null,
-              name: item.name,
-              calories: item.calories ?? null,
-              portion: item.portion ?? null,
-              date: today,
-              is_vegetarian: isVegetarian,
-              is_vegan: isVegan,
+              station_id:      dbStation.id,
+              original_id:     item.id ?? null,
+              name:            item.name,
+              calories:        item.calories ?? null,
+              portion:         item.portion ?? null,
+              date:            today,
+              is_vegetarian:   isVegetarian,
+              is_vegan:        isVegan,
               is_high_protein: isHighProtein,
             })
-            .select()
-            .single();
+            .select().single();
 
           if (itemInsErr) { errors.push(`item ${item.name}: ${itemInsErr.message}`); continue; }
 
-          // Insert nutrients
-          if (d?.nutrients?.length) {
-            const nutrients = d.nutrients.map(n => ({
-              menu_item_id: dbItem.id,
-              name: n.name,
-              value: n.value,
-              uom: n.uom,
+          if (item.nutrients?.length) {
+            const nutrients = item.nutrients.map(n => ({
+              menu_item_id:  dbItem.id,
+              name:          n.name,
+              value:         n.value,
+              uom:           n.uom,
               value_numeric: parseNumeric(n.valueNumeric),
             }));
             const { error: nutErr } = await supabase.from('nutrients').insert(nutrients);
@@ -179,20 +153,15 @@ export default async function handler(req, res) {
 
           totalItems++;
         }
+        console.log(`[scrape]   ${period.name} / ${category.name}: ${category.items?.length || 0} items`);
       }
     }
   }
 
-  // Ensure today's vote row exists
   await supabase
     .from('steast_vs_iv')
     .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
 
   console.log(`[scrape] Done. ${totalItems} items inserted. ${errors.length} errors.`);
-  return res.json({
-    date: today,
-    totalItems,
-    errors: errors.length ? errors : undefined,
-    ok: true,
-  });
+  return res.json({ date: today, totalItems, errors: errors.length ? errors : undefined, ok: true });
 }
