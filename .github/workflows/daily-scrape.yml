@@ -9,6 +9,11 @@ on:
     - cron: '0 5 * * *'   # 1 AM ET  — primary scrape
     - cron: '0 7 * * *'   # 3 AM ET  — backup before breakfast
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force re-scrape even if data already exists'
+        type: boolean
+        default: false
 
 jobs:
   scrape:
@@ -32,7 +37,7 @@ jobs:
       - name: Run scraper
         run: |
           echo "Scraping menu for $(TZ=America/New_York date '+%Y-%m-%d')..."
-          node run-scrape.js
+          node run-scrape.js ${{ github.event.inputs.force == 'true' && '--force' || '' }}
         working-directory: backend-folder
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

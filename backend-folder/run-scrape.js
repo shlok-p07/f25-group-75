@@ -91,10 +91,21 @@ async function apiv4Get(page, url) {
 async function main() {
   const { data: existing } = await supabase
     .from('menu_items').select('id').eq('date', today).limit(1);
-  if (existing?.length) {
-    if (!force) {
-      console.log(`Menu data already exists for ${today}. Use --force to re-scrape.`);
-      return;
+  const { data: existingLocs } = await supabase
+    .from('locations').select('id').eq('date', today).limit(1);
+
+  const hasItems = existing?.length > 0;
+  const hasLocs  = existingLocs?.length > 0;
+  const isComplete = hasItems && hasLocs;
+
+  if (isComplete && !force) {
+    console.log(`Menu data already exists for ${today}. Use --force to re-scrape.`);
+    return;
+  }
+
+  if (hasItems || hasLocs) {
+    if (!isComplete) {
+      console.log(`Partial data found for ${today} (items=${hasItems}, locations=${hasLocs}) — clearing and re-scraping...`);
     }
     await clearToday();
   }
