@@ -26,13 +26,17 @@ jobs:
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             FORCE_PARAM="?force=true"
           fi
-          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" --max-time 330 \
-            "https://$VERCEL_URL/api/scrape$FORCE_PARAM" \
+          # Strip any scheme or trailing path the secret value might contain
+          HOST="${VERCEL_URL#https://}"
+          HOST="${HOST#http://}"
+          HOST="${HOST%%/*}"
+          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" --max-time 30 \
+            "https://${HOST}/api/scrape${FORCE_PARAM}" \
             -H "Authorization: Bearer $CRON_SECRET")
           echo "HTTP $STATUS"
           cat /tmp/scrape_response.json
           echo ""
-          [ "$STATUS" = "200" ] || { echo "Scrape endpoint returned HTTP $STATUS"; exit 1; }
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "202" ] || { echo "Scrape endpoint returned HTTP $STATUS"; exit 1; }
         env:
           VERCEL_URL: ${{ secrets.VERCEL_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}

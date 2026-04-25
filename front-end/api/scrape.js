@@ -66,6 +66,10 @@ export default async function handler(req, res) {
     return res.json({ message: `Menu data already exists for ${today}`, skipped: true });
   }
 
+  // Respond immediately so callers (e.g. GitHub Actions curl) don't time out
+  // waiting for the full scrape. Vercel keeps the function alive up to maxDuration.
+  res.status(202).json({ message: 'Scrape started', date: today });
+
   if (hasItems || hasLocs) {
     console.log(`[scrape] Partial or stale data found (items=${hasItems}, locations=${hasLocs}) — clearing...`);
     if (existing?.length) {
@@ -84,11 +88,12 @@ export default async function handler(req, res) {
     locations = data?.locations;
   } catch (err) {
     console.error('[scrape] Failed to fetch todays_menu:', err.message);
-    return res.status(502).json({ error: 'Failed to reach DineOnCampus API', detail: err.message });
+    return;
   }
 
   if (!locations?.length) {
-    return res.status(404).json({ error: 'DineOnCampus returned no locations' });
+    console.error('[scrape] DineOnCampus returned no locations');
+    return;
   }
 
   let totalItems = 0;
@@ -183,5 +188,4 @@ export default async function handler(req, res) {
     .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
 
   console.log(`[scrape] Done. ${totalItems} items inserted. ${errors.length} errors.`);
-  return res.json({ date: today, totalItems, errors: errors.length ? errors : undefined, ok: true });
 }
