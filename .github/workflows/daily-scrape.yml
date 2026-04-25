@@ -26,10 +26,8 @@ jobs:
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             FORCE_PARAM="?force=true"
           fi
-          # Strip any scheme or trailing path the secret value might contain
-          HOST="${VERCEL_URL#https://}"
-          HOST="${HOST#http://}"
-          HOST="${HOST%%/*}"
+          # Strip scheme, path, and any whitespace/newlines from the secret value
+          HOST=$(printf '%s' "$VERCEL_URL" | tr -d '[:space:]' | sed 's|^https\?://||' | cut -d'/' -f1)
           STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" --max-time 30 \
             "https://${HOST}/api/scrape${FORCE_PARAM}" \
             -H "Authorization: Bearer $CRON_SECRET")
