@@ -26,9 +26,10 @@ jobs:
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             FORCE_PARAM="?force=true"
           fi
-          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" \
+          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" --max-time 330 \
             "https://$VERCEL_URL/api/scrape$FORCE_PARAM" \
             -H "Authorization: Bearer $CRON_SECRET")
+          echo "HTTP $STATUS"
           cat /tmp/scrape_response.json
           echo ""
           [ "$STATUS" = "200" ] || { echo "Scrape endpoint returned HTTP $STATUS"; exit 1; }
