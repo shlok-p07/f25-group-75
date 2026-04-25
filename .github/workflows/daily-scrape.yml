@@ -1,8 +1,8 @@
 name: Daily Menu Scrape
 
 # DineOnCampus posts the next day's menus around 11 PM–midnight ET.
-# Runs the Puppeteer scraper directly (bypasses Cloudflare via stealth plugin).
-# The Vercel cron (vercel.json) also fires at 8 AM UTC as a backup for simple days.
+# GitHub Actions IPs are Cloudflare-blocked from apiv4.dineoncampus.com, so we
+# trigger the Vercel /api/scrape endpoint instead — Vercel's IPs are not blocked.
 
 on:
   schedule:
@@ -19,26 +19,19 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: latest
-          run_install: false
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: backend-folder
-
-      - name: Run scraper
+      - name: Trigger scrape via Vercel
         run: |
-          echo "Scraping menu for $(TZ=America/New_York date '+%Y-%m-%d')..."
-          node run-scrape.js ${{ github.event.inputs.force == 'true' && '--force' || '' }}
-        working-directory: backend-folder
+          echo "Triggering scrape for $(TZ=America/New_York date '+%Y-%m-%d')..."
+          FORCE_PARAM=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            FORCE_PARAM="?force=true"
+          fi
+          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" \
+            "https://$VERCEL_URL/api/scrape$FORCE_PARAM" \
+            -H "Authorization: Bearer $CRON_SECRET")
+          cat /tmp/scrape_response.json
+          echo ""
+          [ "$STATUS" = "200" ] || { echo "Scrape endpoint returned HTTP $STATUS"; exit 1; }
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VERCEL_URL: ${{ secrets.VERCEL_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

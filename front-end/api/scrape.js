@@ -42,6 +42,8 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  const force = req.query.force === 'true';
+
   const supabase = createClient(
     process.env.SUPABASE_URL,
     process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -52,10 +54,28 @@ export default async function handler(req, res) {
 
   const { data: existing } = await supabase
     .from('menu_items').select('id').eq('date', today).limit(1);
+  const { data: existingLocs } = await supabase
+    .from('locations').select('id').eq('date', today).limit(1);
 
-  if (existing?.length) {
+  const hasItems = existing?.length > 0;
+  const hasLocs  = existingLocs?.length > 0;
+  const isComplete = hasItems && hasLocs;
+
+  if (isComplete && !force) {
     console.log(`[scrape] Data already exists for ${today}, skipping.`);
     return res.json({ message: `Menu data already exists for ${today}`, skipped: true });
+  }
+
+  if (hasItems || hasLocs) {
+    console.log(`[scrape] Partial or stale data found (items=${hasItems}, locations=${hasLocs}) — clearing...`);
+    if (existing?.length) {
+      const ids = existing.map(i => i.id);
+      await supabase.from('nutrients').delete().in('menu_item_id', ids);
+    }
+    await supabase.from('menu_items').delete().eq('date', today);
+    await supabase.from('stations').delete().eq('date', today);
+    await supabase.from('periods').delete().eq('date', today);
+    await supabase.from('locations').delete().eq('date', today);
   }
 
   let locations;
