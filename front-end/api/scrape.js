@@ -1,7 +1,14 @@
 /**
- * Vercel Cron Handler — runs daily at 8 AM UTC (3-4 AM ET)
+ * Vercel Cron Handler — runs daily at 7 AM UTC (2 AM EST / 3 AM EDT)
  * Fetches today's menu from apiv4.dineoncampus.com and upserts into Supabase.
- * Uses apiv4 (not api.dineoncampus.com/v1 which is Cloudflare-blocked from serverless).
+ *
+ * apiv4.dineoncampus.com is Cloudflare-protected and blocks datacenter IPs.
+ * When ZENROWS_KEY is set, requests are routed through ZenRows' residential
+ * proxy network which bypasses Cloudflare automatically — enabling fully
+ * automated cloud scraping with no local machine required.
+ *
+ * Get a free ZenRows API key at https://app.zenrows.com/register (1,000 free credits).
+ * Add ZENROWS_KEY to your Vercel environment variables to activate.
  *
  * All per-period API calls run in parallel to stay within Vercel's execution limit.
  */
@@ -28,6 +35,26 @@ const DINE_HEADERS = {
 };
 
 async function apiv4Get(url) {
+  const zenrowsKey = process.env.ZENROWS_KEY;
+
+  if (zenrowsKey) {
+    // Route through ZenRows residential proxy to bypass Cloudflare IP blocks
+    const proxyUrl = new URL('https://api.zenrows.com/v1/');
+    proxyUrl.searchParams.set('apikey', zenrowsKey);
+    proxyUrl.searchParams.set('url', url);
+    proxyUrl.searchParams.set('custom_headers', 'true');
+    const res = await fetch(proxyUrl.toString(), {
+      headers: {
+        'Referer': DINE_HEADERS['Referer'],
+        'Origin': DINE_HEADERS['Origin'],
+        'Accept': DINE_HEADERS['Accept'],
+      },
+    });
+    if (!res.ok) throw new Error(`ZenRows HTTP ${res.status} for ${url}`);
+    return await res.json();
+  }
+
+  // Direct fetch — only works from residential IPs (local machine)
   const res = await fetch(url, { headers: DINE_HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
   const text = await res.text();
