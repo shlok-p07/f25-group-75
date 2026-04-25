@@ -34,10 +34,6 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: backend-folder
 
-      - name: Install Puppeteer browser
-        run: npx puppeteer browsers install chrome
-        working-directory: backend-folder
-
       - name: Run scraper
         run: |
           echo "Scraping menu for $(TZ=America/New_York date '+%Y-%m-%d')..."
