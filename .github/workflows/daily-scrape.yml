@@ -1,13 +1,12 @@
 name: Daily Menu Scrape
 
-# DineOnCampus posts the next day's menus around 11 PM–midnight ET.
-# GitHub Actions IPs are Cloudflare-blocked from apiv4.dineoncampus.com, so we
-# trigger the Vercel /api/scrape endpoint instead — Vercel's IPs are not blocked.
+# Runs on a self-hosted macOS runner (residential IP required — Cloudflare blocks
+# datacenter IPs from apiv4.dineoncampus.com). Falls back to ubuntu-latest if no
+# self-hosted runner is available, but the scrape will fail on the Cloudflare step.
 
 on:
   schedule:
-    - cron: '0 5 * * *'   # 1 AM ET  — primary scrape
-    - cron: '0 7 * * *'   # 3 AM ET  — backup before breakfast
+    - cron: '0 7 * * *'   # 2 AM EST / 3 AM EDT — after DineOnCampus posts next day's menus
   workflow_dispatch:
     inputs:
       force:
@@ -17,24 +16,19 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - name: Trigger scrape via Vercel
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: backend-folder
+
+      - name: Run scraper
         run: |
-          echo "Triggering scrape for $(TZ=America/New_York date '+%Y-%m-%d')..."
-          FORCE_PARAM=""
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
-            FORCE_PARAM="?force=true"
-          fi
-          # Strip scheme, path, and any whitespace/newlines from the secret value
-          HOST=$(printf '%s' "$VERCEL_URL" | tr -d '[:space:]' | sed 's|^https\?://||' | cut -d'/' -f1)
-          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" --max-time 120 \
-            "https://${HOST}/api/scrape${FORCE_PARAM}" \
-            -H "Authorization: Bearer $CRON_SECRET")
-          echo "HTTP $STATUS"
-          cat /tmp/scrape_response.json
-          echo ""
-          [ "$STATUS" = "200" ] || { echo "Scrape endpoint returned HTTP $STATUS"; exit 1; }
+          echo "Scraping menu for $(TZ=America/New_York date '+%Y-%m-%d')..."
+          node run-scrape.js ${{ github.event.inputs.force == 'true' && '--force' || '' }}
+        working-directory: backend-folder
         env:
-          VERCEL_URL: ${{ secrets.VERCEL_URL }}
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
