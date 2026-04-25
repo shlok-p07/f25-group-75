@@ -28,13 +28,13 @@ jobs:
           fi
           # Strip scheme, path, and any whitespace/newlines from the secret value
           HOST=$(printf '%s' "$VERCEL_URL" | tr -d '[:space:]' | sed 's|^https\?://||' | cut -d'/' -f1)
-          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" --max-time 30 \
+          STATUS=$(curl -s -o /tmp/scrape_response.json -w "%{http_code}" --max-time 120 \
             "https://${HOST}/api/scrape${FORCE_PARAM}" \
             -H "Authorization: Bearer $CRON_SECRET")
           echo "HTTP $STATUS"
           cat /tmp/scrape_response.json
           echo ""
-          [ "$STATUS" = "200" ] || [ "$STATUS" = "202" ] || { echo "Scrape endpoint returned HTTP $STATUS"; exit 1; }
+          [ "$STATUS" = "200" ] || { echo "Scrape endpoint returned HTTP $STATUS"; exit 1; }
         env:
           VERCEL_URL: ${{ secrets.VERCEL_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}

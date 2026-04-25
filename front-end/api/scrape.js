@@ -2,6 +2,8 @@
  * Vercel Cron Handler — runs daily at 8 AM UTC (3-4 AM ET)
  * Fetches today's menu from apiv4.dineoncampus.com and upserts into Supabase.
  * Uses apiv4 (not api.dineoncampus.com/v1 which is Cloudflare-blocked from serverless).
+ *
+ * All per-period API calls run in parallel to stay within Vercel's execution limit.
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -52,73 +54,65 @@ export default async function handler(req, res) {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   console.log(`[scrape] Starting scrape for ${today}`);
 
-  const { data: existing } = await supabase
-    .from('menu_items').select('id').eq('date', today).limit(1);
-  const { data: existingLocs } = await supabase
-    .from('locations').select('id').eq('date', today).limit(1);
+  const [{ data: existing }, { data: existingLocs }] = await Promise.all([
+    supabase.from('menu_items').select('id').eq('date', today).limit(1),
+    supabase.from('locations').select('id').eq('date', today).limit(1),
+  ]);
 
   const hasItems = existing?.length > 0;
   const hasLocs  = existingLocs?.length > 0;
-  const isComplete = hasItems && hasLocs;
 
-  if (isComplete && !force) {
+  if (hasItems && hasLocs && !force) {
     console.log(`[scrape] Data already exists for ${today}, skipping.`);
     return res.json({ message: `Menu data already exists for ${today}`, skipped: true });
   }
 
-  // Respond immediately so callers (e.g. GitHub Actions curl) don't time out
-  // waiting for the full scrape. Vercel keeps the function alive up to maxDuration.
-  res.status(202).json({ message: 'Scrape started', date: today });
-
   if (hasItems || hasLocs) {
-    console.log(`[scrape] Partial or stale data found (items=${hasItems}, locations=${hasLocs}) — clearing...`);
-    if (existing?.length) {
-      const ids = existing.map(i => i.id);
-      await supabase.from('nutrients').delete().in('menu_item_id', ids);
-    }
-    await supabase.from('menu_items').delete().eq('date', today);
-    await supabase.from('stations').delete().eq('date', today);
-    await supabase.from('periods').delete().eq('date', today);
-    await supabase.from('locations').delete().eq('date', today);
+    console.log(`[scrape] Clearing partial/stale data for ${today}...`);
+    const itemIds = (existing || []).map(i => i.id);
+    await Promise.all([
+      itemIds.length ? supabase.from('nutrients').delete().in('menu_item_id', itemIds) : Promise.resolve(),
+      supabase.from('menu_items').delete().eq('date', today),
+      supabase.from('stations').delete().eq('date', today),
+      supabase.from('periods').delete().eq('date', today),
+      supabase.from('locations').delete().eq('date', today),
+    ]);
   }
 
-  let locations;
+  let rawLocations;
   try {
     const data = await apiv4Get('https://apiv4.dineoncampus.com/sites/todays_menu');
-    locations = data?.locations;
+    rawLocations = data?.locations;
   } catch (err) {
     console.error('[scrape] Failed to fetch todays_menu:', err.message);
-    return;
+    return res.status(502).json({ error: 'Failed to reach DineOnCampus API', detail: err.message });
   }
 
-  if (!locations?.length) {
-    console.error('[scrape] DineOnCampus returned no locations');
-    return;
+  const allowed = (rawLocations || []).filter(l => ALLOWED_HALLS.some(n => l.name?.includes(n)));
+  if (!allowed.length) {
+    return res.status(404).json({ error: 'No matching dining halls found in todays_menu' });
   }
 
-  let totalItems = 0;
   const errors = [];
+  let totalItems = 0;
 
-  for (const loc of locations) {
-    if (!ALLOWED_HALLS.some(n => loc.name?.includes(n))) continue;
-    console.log(`[scrape] Processing: ${loc.name}`);
-
-    const { data: dbLoc, error: locInsErr } = await supabase
+  // Insert locations, then fan out period fetches in parallel per location
+  await Promise.all(allowed.map(async (loc) => {
+    const { data: dbLoc, error: locErr } = await supabase
       .from('locations')
       .insert({ original_id: loc.id, name: loc.name, date: today })
       .select().single();
+    if (locErr) { errors.push(`location ${loc.name}: ${locErr.message}`); return; }
 
-    if (locInsErr) { errors.push(`location ${loc.name}: ${locInsErr.message}`); continue; }
+    const periods = (loc.periods ?? []).filter(p => p.name !== 'Everyday');
 
-    for (const period of (loc.periods ?? [])) {
-      if (period.name === 'Everyday') continue;
-
-      const { data: dbPeriod, error: perInsErr } = await supabase
+    // Fetch all period menus in parallel for this location
+    await Promise.all(periods.map(async (period) => {
+      const { data: dbPeriod, error: perErr } = await supabase
         .from('periods')
         .insert({ original_id: period.id, location_id: dbLoc.id, name: period.name, date: today })
         .select().single();
-
-      if (perInsErr) { errors.push(`period ${period.name}: ${perInsErr.message}`); continue; }
+      if (perErr) { errors.push(`period ${period.name}: ${perErr.message}`); return; }
 
       let menuData = null;
       try {
@@ -126,66 +120,68 @@ export default async function handler(req, res) {
           `https://apiv4.dineoncampus.com/locations/${loc.id}/menu?date=${today}&period=${period.id}`
         );
       } catch (e) {
-        console.warn(`[scrape] Could not fetch menu for period ${period.id}:`, e.message);
+        console.warn(`[scrape] Menu fetch failed for ${period.name}:`, e.message);
+        return;
       }
 
-      if (!menuData?.period?.categories?.length) {
-        console.log(`[scrape]   ${period.name}: no categories`);
-        continue;
-      }
+      if (!menuData?.period?.categories?.length) return;
 
       for (const category of menuData.period.categories) {
-        const { data: dbStation, error: stInsErr } = await supabase
+        const { data: dbStation, error: stErr } = await supabase
           .from('stations')
           .insert({ original_id: category.id ?? null, period_id: dbPeriod.id, name: category.name, date: today })
           .select().single();
+        if (stErr) { errors.push(`station ${category.name}: ${stErr.message}`); continue; }
 
-        if (stInsErr) { errors.push(`station ${category.name}: ${stInsErr.message}`); continue; }
+        const items = category.items ?? [];
 
-        for (const item of (category.items ?? [])) {
-          const isVegan       = item.filters?.some(f => f.name === 'Vegan') ?? false;
-          const isVegetarian  = item.filters?.some(f => f.name === 'Vegetarian' || f.name === 'Vegan') ?? false;
-          const isHighProtein = item.filters?.some(f => f.name === 'Good Source of Protein') ?? false;
+        // Batch-insert all items for this station in one call
+        if (!items.length) continue;
+        const itemRows = items.map(item => ({
+          station_id:      dbStation.id,
+          original_id:     item.id ?? null,
+          name:            item.name,
+          calories:        item.calories ?? null,
+          portion:         item.portion ?? null,
+          date:            today,
+          is_vegetarian:   item.filters?.some(f => f.name === 'Vegetarian' || f.name === 'Vegan') ?? false,
+          is_vegan:        item.filters?.some(f => f.name === 'Vegan') ?? false,
+          is_high_protein: item.filters?.some(f => f.name === 'Good Source of Protein') ?? false,
+        }));
 
-          const { data: dbItem, error: itemInsErr } = await supabase
-            .from('menu_items')
-            .insert({
-              station_id:      dbStation.id,
-              original_id:     item.id ?? null,
-              name:            item.name,
-              calories:        item.calories ?? null,
-              portion:         item.portion ?? null,
-              date:            today,
-              is_vegetarian:   isVegetarian,
-              is_vegan:        isVegan,
-              is_high_protein: isHighProtein,
-            })
-            .select().single();
+        const { data: dbItems, error: itemsErr } = await supabase
+          .from('menu_items').insert(itemRows).select('id, original_id');
+        if (itemsErr) { errors.push(`items for ${category.name}: ${itemsErr.message}`); continue; }
 
-          if (itemInsErr) { errors.push(`item ${item.name}: ${itemInsErr.message}`); continue; }
+        totalItems += dbItems.length;
 
-          if (item.nutrients?.length) {
-            const nutrients = item.nutrients.map(n => ({
+        // Batch-insert all nutrients across all items in this station
+        const nutrients = [];
+        for (const dbItem of (dbItems || [])) {
+          const raw = items.find(i => (i.id ?? null) === dbItem.original_id);
+          for (const n of (raw?.nutrients ?? [])) {
+            nutrients.push({
               menu_item_id:  dbItem.id,
               name:          n.name,
               value:         n.value,
               uom:           n.uom,
               value_numeric: parseNumeric(n.valueNumeric),
-            }));
-            const { error: nutErr } = await supabase.from('nutrients').insert(nutrients);
-            if (nutErr) errors.push(`nutrients for ${item.name}: ${nutErr.message}`);
+            });
           }
-
-          totalItems++;
         }
-        console.log(`[scrape]   ${period.name} / ${category.name}: ${category.items?.length || 0} items`);
-      }
-    }
-  }
+        if (nutrients.length) {
+          const { error: nutErr } = await supabase.from('nutrients').insert(nutrients);
+          if (nutErr) errors.push(`nutrients for ${category.name}: ${nutErr.message}`);
+        }
 
-  await supabase
-    .from('steast_vs_iv')
+        console.log(`[scrape] ${loc.name} / ${period.name} / ${category.name}: ${items.length} items`);
+      }
+    }));
+  }));
+
+  await supabase.from('steast_vs_iv')
     .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
 
-  console.log(`[scrape] Done. ${totalItems} items inserted. ${errors.length} errors.`);
+  console.log(`[scrape] Done. ${totalItems} items. ${errors.length} errors.`);
+  return res.json({ date: today, totalItems, errors: errors.length ? errors : undefined, ok: true });
 }
