@@ -7,7 +7,10 @@ export default defineConfig({
     plugins: [react(), tailwindcss()],
     server: {
         proxy: {
-            '/api': 'http://localhost:3000'
+            '/api': {
+                target: 'https://nu-dining.vercel.app',
+                changeOrigin: true,
+            }
         }
     }
 });

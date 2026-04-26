@@ -126,7 +126,7 @@ export default async function handler(req, res) {
   if (!period) {
     return res.status(404).json({
       error: 'Period not found',
-      message: `No ${periodName} menu found for ${locationName} on ${dateToUse}.`,
+      message: `No ${periodName} menu found for ${locationKeyword} on ${dateToUse}.`,
     });
   }
 

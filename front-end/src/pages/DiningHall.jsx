@@ -9,6 +9,7 @@ export function DiningHall() {
     const [displayDate, setDisplayDate] = useState(null);
     const [activeFilters, setActiveFilters] = useState(new Set());
     const [notServed, setNotServed] = useState(false);
+    const [isClosed, setIsClosed] = useState(false);
     const { hall = "stetson-east", meal = "breakfast" } = useParams();
 
     const dietaryRestrictions = [
@@ -30,6 +31,7 @@ export function DiningHall() {
     const fetchMenu = async () => {
         setIsLoading(true);
         setNotServed(false);
+        setIsClosed(false);
         try {
             const res = await fetch(`/api/menu/${hall}/${meal}`);
             if (res.status === 404) {
@@ -40,6 +42,13 @@ export function DiningHall() {
             }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const json = await res.json();
+            const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            if (json.date && json.date !== today) {
+                setIsClosed(true);
+                setMenuItems([]);
+                setDisplayDate(null);
+                return;
+            }
             const normalized = (json.items || []).map(i => {
                 // Parse protein grams from the nutrient string the API returns (e.g. "15 g" → 15)
                 let proteinGrams = null;
@@ -122,7 +131,7 @@ export function DiningHall() {
                         </div>
 
                         {/** Filter items in-memory for a clean UI */}
-                        <ItemGrid menuItems={menuItems} activeFilters={activeFilters} isLoading={isLoading} notServed={notServed} meal={meal} hall={hall} />
+                        <ItemGrid menuItems={menuItems} activeFilters={activeFilters} isLoading={isLoading} notServed={notServed} isClosed={isClosed} meal={meal} hall={hall} />
                     </div>
                 </main>
             </div>
@@ -132,7 +141,7 @@ export function DiningHall() {
 
 export default DiningHall;
 
-function ItemGrid({ menuItems, activeFilters, isLoading, notServed, meal, hall }) {
+function ItemGrid({ menuItems, activeFilters, isLoading, notServed, isClosed, meal, hall }) {
     const filteredMenuItems = useMemo(() => {
         if (activeFilters.size === 0) return menuItems;
         return menuItems.filter(item => {
@@ -162,11 +171,11 @@ function ItemGrid({ menuItems, activeFilters, isLoading, notServed, meal, hall }
 
     const emptyState = (() => {
         if (isLoading) return null;
-        if (notServed) return (
+        if (isClosed || notServed) return (
             <div className="col-span-full bg-white/5 rounded-2xl p-10 text-center border border-white/8">
-                <p className="text-4xl mb-4">🍽️</p>
-                <p className="text-white text-xl font-semibold">{mealName} isn't served here today</p>
-                <p className="text-gray-400 mt-2 text-sm">{hallName} doesn't offer {mealName.toLowerCase()} — try checking breakfast or dinner instead.</p>
+                <p className="text-4xl mb-4">🔒</p>
+                <p className="text-white text-xl font-semibold">{hallName} is closed today</p>
+                <p className="text-gray-400 mt-2 text-sm">This dining hall isn't serving today. Try a different hall or come back tomorrow.</p>
             </div>
         );
         if (menuItems.length > 0 && filteredMenuItems.length === 0) return (
@@ -178,9 +187,9 @@ function ItemGrid({ menuItems, activeFilters, isLoading, notServed, meal, hall }
         );
         if (menuItems.length === 0) return (
             <div className="col-span-full bg-white/5 rounded-2xl p-10 text-center border border-white/8">
-                <p className="text-4xl mb-4">⏳</p>
-                <p className="text-white text-xl font-semibold">Menu not available yet</p>
-                <p className="text-gray-400 mt-2 text-sm">The menu for {mealName.toLowerCase()} hasn't been posted yet. Check back soon or try refreshing.</p>
+                <p className="text-4xl mb-4">🔒</p>
+                <p className="text-white text-xl font-semibold">{hallName} is closed today</p>
+                <p className="text-gray-400 mt-2 text-sm">This dining hall isn't serving today. Try a different hall or come back tomorrow.</p>
             </div>
         );
         return null;
