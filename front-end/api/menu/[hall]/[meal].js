@@ -87,8 +87,8 @@ export default async function handler(req, res) {
 
   if (!locations || locations.length === 0) {
     return res.status(404).json({
-      error: 'No menu data found',
-      message: `No data found for ${locationKeyword}. The database may need to be populated — run /api/scrape.`,
+      error: 'hall_closed',
+      message: `No data found for ${locationKeyword}.`,
     });
   }
 
@@ -125,7 +125,7 @@ export default async function handler(req, res) {
 
   if (!period) {
     return res.status(404).json({
-      error: 'Period not found',
+      error: 'meal_not_posted',
       message: `No ${periodName} menu found for ${locationKeyword} on ${dateToUse}.`,
     });
   }

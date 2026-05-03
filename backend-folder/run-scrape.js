@@ -63,6 +63,12 @@ async function browserGet(browser, url) {
 }
 
 async function main() {
+  // When launched by launchd (--background), wait for network to stabilize after wake
+  if (process.argv.includes('--background')) {
+    console.log('Waiting 60s for network to stabilize...');
+    await new Promise(r => setTimeout(r, 60000));
+  }
+
   const { data: existing } = await supabase
     .from('menu_items').select('id').eq('date', today).limit(1);
   const { data: existingLocs } = await supabase
@@ -110,11 +116,24 @@ async function main() {
     });
 
     console.log('Loading DineOnCampus page (getting Cloudflare clearance)...');
-    await page.goto('https://dineoncampus.com/northeastern/whats-on-the-menu', {
-      waitUntil: 'networkidle2',
-      timeout: 60000,
-    });
-    await new Promise(r => setTimeout(r, 4000));
+    let loaded = false;
+    for (let attempt = 1; attempt <= 3 && !loaded; attempt++) {
+      try {
+        if (attempt > 1) {
+          console.log(`  Retry attempt ${attempt}...`);
+          await new Promise(r => setTimeout(r, 15000));
+        }
+        await page.goto('https://dineoncampus.com/northeastern/whats-on-the-menu', {
+          waitUntil: 'domcontentloaded',
+          timeout: 90000,
+        });
+        loaded = true;
+      } catch (e) {
+        console.warn(`  Page load attempt ${attempt} failed: ${e.message}`);
+      }
+    }
+    if (!loaded) throw new Error('Failed to load DineOnCampus after 3 attempts');
+    await new Promise(r => setTimeout(r, 6000));
 
     let locations = captured['/sites/todays_menu']?.locations;
 

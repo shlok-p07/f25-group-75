@@ -10,6 +10,7 @@ export function DiningHall() {
     const [activeFilters, setActiveFilters] = useState(new Set());
     const [notServed, setNotServed] = useState(false);
     const [isClosed, setIsClosed] = useState(false);
+    const [mealNotPosted, setMealNotPosted] = useState(false);
     const { hall = "stetson-east", meal = "breakfast" } = useParams();
 
     const dietaryRestrictions = [
@@ -32,10 +33,16 @@ export function DiningHall() {
         setIsLoading(true);
         setNotServed(false);
         setIsClosed(false);
+        setMealNotPosted(false);
         try {
             const res = await fetch(`/api/menu/${hall}/${meal}`);
             if (res.status === 404) {
-                setNotServed(true);
+                const json = await res.json().catch(() => ({}));
+                if (json.error === 'meal_not_posted') {
+                    setMealNotPosted(true);
+                } else {
+                    setNotServed(true);
+                }
                 setMenuItems([]);
                 setDisplayDate(null);
                 return;
@@ -131,7 +138,7 @@ export function DiningHall() {
                         </div>
 
                         {/** Filter items in-memory for a clean UI */}
-                        <ItemGrid menuItems={menuItems} activeFilters={activeFilters} isLoading={isLoading} notServed={notServed} isClosed={isClosed} meal={meal} hall={hall} />
+                        <ItemGrid menuItems={menuItems} activeFilters={activeFilters} isLoading={isLoading} notServed={notServed} isClosed={isClosed} mealNotPosted={mealNotPosted} meal={meal} hall={hall} />
                     </div>
                 </main>
             </div>
@@ -141,7 +148,7 @@ export function DiningHall() {
 
 export default DiningHall;
 
-function ItemGrid({ menuItems, activeFilters, isLoading, notServed, isClosed, meal, hall }) {
+function ItemGrid({ menuItems, activeFilters, isLoading, notServed, isClosed, mealNotPosted, meal, hall }) {
     const filteredMenuItems = useMemo(() => {
         if (activeFilters.size === 0) return menuItems;
         return menuItems.filter(item => {
@@ -176,6 +183,13 @@ function ItemGrid({ menuItems, activeFilters, isLoading, notServed, isClosed, me
                 <p className="text-4xl mb-4">🔒</p>
                 <p className="text-white text-xl font-semibold">{hallName} is closed today</p>
                 <p className="text-gray-400 mt-2 text-sm">This dining hall isn't serving today. Try a different hall or come back tomorrow.</p>
+            </div>
+        );
+        if (mealNotPosted) return (
+            <div className="col-span-full bg-white/5 rounded-2xl p-10 text-center border border-white/8">
+                <p className="text-4xl mb-4">⏳</p>
+                <p className="text-white text-xl font-semibold">{mealName} menu isn't available yet</p>
+                <p className="text-gray-400 mt-2 text-sm">The {mealName.toLowerCase()} menu hasn't been posted yet. Check back closer to mealtime.</p>
             </div>
         );
         if (menuItems.length > 0 && filteredMenuItems.length === 0) return (
