@@ -35,7 +35,8 @@ function parseNumeric(v) {
 
 const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 const force = process.argv.includes('--force');
-console.log(`Scraping menu data for ${today}...\n`);
+const timestamp = new Date().toISOString();
+console.log(`\n[${timestamp}] Scraping menu data for ${today}...\n`);
 
 async function clearToday() {
   const { data: items } = await supabase.from('menu_items').select('id').eq('date', today);
@@ -242,7 +243,7 @@ async function main() {
       .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
 
     if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.join('\n'));
-    console.log(`\nDone! Inserted ${totalItems} menu items for ${today}.`);
+    console.log(`\nDone! Inserted ${totalItems} menu items for ${today}. [${new Date().toISOString()}]\n`);
   } finally {
     await browser.close();
   }
