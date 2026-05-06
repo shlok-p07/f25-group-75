@@ -141,7 +141,7 @@ async function main() {
     if (!locations?.length) {
       console.log('XHR not intercepted — navigating directly to API...');
       try {
-        const data = await browserGet(browser, 'https://apiv4.dineoncampus.com/sites/todays_menu');
+        const data = await browserGet(browser, 'https://apiv4.dineoncampus.com/sites/todays_menu?siteId=5751fd2b90975b60e048929a');
         locations = data?.locations;
       } catch (e) {
         console.error('Direct API navigation failed:', e.message);
@@ -149,7 +149,8 @@ async function main() {
     }
 
     if (!locations?.length) {
-      throw new Error('Could not get location data from todays_menu');
+      console.log(`Menu not posted yet for ${today} — will retry at next scheduled run.`);
+      return;
     }
 
     console.log(`\nFound ${locations.length} locations.\n`);
@@ -241,6 +242,40 @@ async function main() {
 
     await supabase.from('steast_vs_iv')
       .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
+
+    // ── Scrape weekly hours ──────────────────────────────────────────────────
+    console.log('\nFetching weekly hours...');
+    try {
+      const scheduleData = await browserGet(browser,
+        'https://apiv4.dineoncampus.com/locations/weekly_schedule?siteId=5751fd2b90975b60e048929a'
+      );
+      if (scheduleData?.theLocations?.length) {
+        let hoursCount = 0;
+        for (const loc of scheduleData.theLocations) {
+          for (const day of (loc.week || [])) {
+            const { error: hErr } = await supabase.from('location_hours').upsert({
+              location_original_id: loc.id,
+              location_name:        loc.name,
+              location_slug:        loc.slug ?? null,
+              date:                 day.date,
+              day_of_week:          day.day,
+              status:               day.status || (day.closed ? 'closed' : 'open'),
+              hours:                day.hours || [],
+              has_special_hours:    day.has_special_hours || false,
+              always_open:          day.always_open || false,
+              scraped_at:           new Date().toISOString(),
+            }, { onConflict: 'location_original_id,date' });
+            if (!hErr) hoursCount++;
+            else errors.push(`hours ${loc.name} ${day.date}: ${hErr.message}`);
+          }
+        }
+        console.log(`Updated hours for ${hoursCount} location-days across ${scheduleData.theLocations.length} locations.`);
+      } else {
+        console.warn('No weekly schedule data returned.');
+      }
+    } catch (e) {
+      console.warn('Could not fetch weekly hours:', e.message);
+    }
 
     if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.join('\n'));
     console.log(`\nDone! Inserted ${totalItems} menu items for ${today}. [${new Date().toISOString()}]\n`);
