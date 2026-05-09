@@ -139,12 +139,52 @@ async function main() {
     let locations = captured['/sites/todays_menu']?.locations;
 
     if (!locations?.length) {
-      console.log('XHR not intercepted — navigating directly to API...');
+      console.log('XHR locations empty — navigating directly to API...');
       try {
         const data = await browserGet(browser, 'https://apiv4.dineoncampus.com/sites/todays_menu?siteId=5751fd2b90975b60e048929a');
         locations = data?.locations;
+        if (!locations?.length) {
+          console.log('DEBUG todays_menu response:', JSON.stringify(data).slice(0, 800));
+        }
       } catch (e) {
         console.error('Direct API navigation failed:', e.message);
+      }
+    }
+
+    // Fallback: derive locations from status_by_site (works at 2 AM)
+    if (!locations?.length) {
+      console.log('Falling back to status_by_site for location IDs...');
+      try {
+        const status = await browserGet(browser,
+          'https://apiv4.dineoncampus.com/locations/status_by_site?siteId=5751fd2b90975b60e048929a'
+        );
+        const candidateLocs = (status?.locations || []).filter(l =>
+          ALLOWED_HALLS.some(n => l.name?.includes(n))
+        );
+        // For each candidate, fetch its menu directly (the menu endpoint includes period info)
+        const built = [];
+        for (const c of candidateLocs) {
+          try {
+            const menu = await browserGet(browser,
+              `https://apiv4.dineoncampus.com/locations/${c.id}/menu?date=${today}`
+            );
+            if (menu?.menu?.periods?.length || menu?.periods?.length) {
+              built.push({
+                id: c.id,
+                name: c.name,
+                periods: menu.menu?.periods || menu.periods || [],
+              });
+            }
+          } catch (e) {
+            console.warn(`  status_by_site fallback fetch failed for ${c.name}:`, e.message);
+          }
+        }
+        if (built.length) {
+          locations = built;
+          console.log(`Recovered ${built.length} locations via status_by_site fallback.`);
+        }
+      } catch (e) {
+        console.warn('status_by_site fallback failed:', e.message);
       }
     }
 
