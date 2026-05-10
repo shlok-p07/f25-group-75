@@ -12,6 +12,7 @@ import Navbar from "./functions/Navbar";
 import SetPass from "./pages/setPass";
 import About from "./pages/About";
 import Tracker from "./pages/Tracker";
+import Hours from "./pages/Hours";
 function App() {
   return (
     <Router>
@@ -27,6 +28,7 @@ function App() {
         <Route path="/menu/:hall/:meal" element={<DiningHall/>} />
         <Route path="/about" element={<About/>} />
         <Route path="/tracker" element={<Tracker/>} />
+        <Route path="/hours" element={<Hours/>} />
         <Route path= "*" element={<NotFound/>}></Route>
         
       </Routes>
