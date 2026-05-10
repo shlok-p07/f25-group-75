@@ -1,44 +1,6 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import FoodBackground from '../Components/background';
-
-// Hours pulled live from DineOnCampus weekly_schedule API — week of Apr 12 2026
-// Campus Roots (60 Belv) has TWO windows per day with no lunch gap
-const halls = [
-  {
-    name: 'Stetson East',
-    subtitle: 'The Eatery at Stetson East',
-    description:
-      'The largest residential dining hall on campus. Open all day every day of the week with the widest variety of stations.',
-    week: [
-      { day: 'Mon – Thu', slots: ['7:00 AM – 10:00 PM'] },
-      { day: 'Fri',       slots: ['7:00 AM – 9:00 PM']  },
-      { day: 'Sat',       slots: ['8:00 AM – 9:00 PM']  },
-      { day: 'Sun',       slots: ['8:00 AM – 10:00 PM'] },
-    ],
-  },
-  {
-    name: 'International Village',
-    subtitle: 'United Table at International Village',
-    description:
-      'Global cuisines and rotating menus; Latin Kitchen, Spice Bowl, Sushi, Pomodoro, and more. Open every day.',
-    week: [
-      { day: 'Mon – Thu', slots: ['8:00 AM – 10:00 PM'] },
-      { day: 'Fri',       slots: ['8:00 AM – 9:00 PM']  },
-      { day: 'Sat – Sun', slots: ['8:00 AM – 9:00 PM']  },
-    ],
-  },
-  {
-    name: '60 Belvidere',
-    subtitle: 'Campus Roots at 60 Belvidere',
-    description:
-      'Smaller neighbourhood hall near Symphony Hall. Serves breakfast and dinner only; no lunch service. Closed Friday and Saturday.',
-    week: [
-      { day: 'Mon – Thu', slots: ['8:00 AM – 10:00 AM', '4:00 PM – 8:00 PM'], note: 'No lunch service' },
-      { day: 'Fri – Sat', slots: [],                                           closed: true },
-      { day: 'Sun',       slots: ['10:00 AM – 2:00 PM', '4:00 PM – 8:00 PM'] },
-    ],
-  },
-];
 
 const dietaryInfo = [
   {
@@ -58,6 +20,35 @@ const dietaryInfo = [
   },
 ];
 
+const features = [
+  {
+    icon: '🍽️',
+    title: 'Live Menus',
+    desc: 'Daily Breakfast, Lunch, and Dinner items — auto-scraped each morning.',
+  },
+  {
+    icon: '🕐',
+    title: 'Real Hours',
+    desc: 'Open/closed status and weekly schedules for every campus dining location.',
+    link: '/hours',
+    linkLabel: 'See Hours →',
+  },
+  {
+    icon: '📊',
+    title: 'Nutrition Tracker',
+    desc: 'Log what you ate and track calories, protein, and other macros over time.',
+    link: '/tracker',
+    linkLabel: 'Open Tracker →',
+  },
+  {
+    icon: '🗳️',
+    title: 'Vote',
+    desc: 'Compare dining halls and rate today\'s menus with the rest of campus.',
+    link: '/vote',
+    linkLabel: 'Cast a vote →',
+  },
+];
+
 export default function About() {
   return (
     <div className="min-h-screen bg-black relative overflow-hidden">
@@ -65,56 +56,42 @@ export default function About() {
 
       <div className="relative z-10 max-w-5xl mx-auto px-4 sm:px-6 pt-28 pb-20">
 
-        {/* ── Header ── */}
+        {/* Header */}
         <div className="text-center mb-14">
           <h1 className="text-4xl md:text-5xl font-extrabold text-white mb-3">
-            Northeastern Dining
+            About NU Dining
           </h1>
-          <p className="text-white/45 text-lg max-w-xl mx-auto">
-            Live hours and dietary info for the three residential dining halls.
+          <p className="text-white/45 text-lg max-w-2xl mx-auto">
+            A live, student-built companion app for Northeastern dining — menus, hours,
+            nutrition tracking, and hall ratings, all auto-updated daily from DineOnCampus.
           </p>
         </div>
 
-        {/* ── Hall cards ── */}
-        <div className="grid md:grid-cols-3 gap-6 mb-14">
-          {halls.map(hall => (
+        {/* Feature cards */}
+        <div className="grid sm:grid-cols-2 gap-4 mb-14">
+          {features.map(f => (
             <div
-              key={hall.name}
-              className="bg-white/4 backdrop-blur-sm border border-white/8 rounded-2xl p-6 flex flex-col gap-5"
+              key={f.title}
+              className="bg-white/4 backdrop-blur-sm border border-white/8 rounded-2xl p-6 flex flex-col gap-3"
             >
-              {/* Title */}
-              <div>
-                <h2 className="text-xl font-bold text-white">{hall.name}</h2>
-                <p className="text-[11px] text-red-400/70 mt-0.5 leading-snug">{hall.subtitle}</p>
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">{f.icon}</span>
+                <h2 className="text-lg font-bold text-white">{f.title}</h2>
               </div>
-
-              <p className="text-sm text-white/45 leading-relaxed">{hall.description}</p>
-
-              {/* Weekly schedule */}
-              <div className="space-y-2.5">
-                {hall.week.map(row => (
-                  <div key={row.day} className="flex flex-col gap-0.5">
-                    <span className="text-[10px] uppercase tracking-widest text-white/25">{row.day}</span>
-                    {row.closed ? (
-                      <span className="text-sm font-semibold text-red-400/60">Closed</span>
-                    ) : (
-                      <div className="flex flex-col gap-0.5">
-                        {row.slots.map(s => (
-                          <span key={s} className="text-sm font-semibold text-white">{s}</span>
-                        ))}
-                        {row.note && (
-                          <span className="text-[11px] text-white/30 italic">{row.note}</span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+              <p className="text-sm text-white/50 leading-relaxed flex-1">{f.desc}</p>
+              {f.link && (
+                <Link
+                  to={f.link}
+                  className="text-sm font-medium text-red-400 hover:text-red-300 transition-colors mt-1"
+                >
+                  {f.linkLabel}
+                </Link>
+              )}
             </div>
           ))}
         </div>
 
-        {/* ── Dietary labels ── */}
+        {/* Dietary labels */}
         <div className="bg-white/4 backdrop-blur-sm border border-white/8 rounded-2xl p-8">
           <h2 className="text-2xl font-bold text-white mb-1 text-center">Dietary Labels</h2>
           <p className="text-white/35 text-sm text-center mb-8">
@@ -134,7 +111,7 @@ export default function About() {
           </div>
 
           <p className="mt-8 pt-5 border-t border-white/6 text-[11px] text-white/20 text-center">
-            Hours sourced from DineOnCampus live API · Week of Apr 12, 2026 · Subject to change during finals, breaks &amp; holidays
+            All data sourced live from DineOnCampus · Subject to change during finals, breaks &amp; holidays
           </p>
         </div>
 
