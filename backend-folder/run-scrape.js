@@ -116,7 +116,7 @@ async function main() {
       } catch { /* ignore */ }
     });
 
-    console.log('Loading DineOnCampus page (getting Cloudflare clearance)...');
+    console.log('Loading new.dineoncampus.com (getting Cloudflare clearance)...');
     let loaded = false;
     for (let attempt = 1; attempt <= 3 && !loaded; attempt++) {
       try {
@@ -124,7 +124,7 @@ async function main() {
           console.log(`  Retry attempt ${attempt}...`);
           await new Promise(r => setTimeout(r, 15000));
         }
-        await page.goto('https://dineoncampus.com/northeastern/whats-on-the-menu', {
+        await page.goto('https://new.dineoncampus.com/public', {
           waitUntil: 'domcontentloaded',
           timeout: 90000,
         });
@@ -134,58 +134,35 @@ async function main() {
       }
     }
     if (!loaded) throw new Error('Failed to load DineOnCampus after 3 attempts');
-    await new Promise(r => setTimeout(r, 6000));
+    await new Promise(r => setTimeout(r, 4000));
 
-    let locations = captured['/sites/todays_menu']?.locations;
-
-    if (!locations?.length) {
-      console.log('XHR locations empty — navigating directly to API...');
-      try {
-        const data = await browserGet(browser, 'https://apiv4.dineoncampus.com/sites/todays_menu?siteId=5751fd2b90975b60e048929a');
-        locations = data?.locations;
-        if (!locations?.length) {
-          console.log('DEBUG todays_menu response:', JSON.stringify(data).slice(0, 800));
-        }
-      } catch (e) {
-        console.error('Direct API navigation failed:', e.message);
-      }
-    }
-
-    // Fallback: derive locations from status_by_site (works at 2 AM)
-    if (!locations?.length) {
-      console.log('Falling back to status_by_site for location IDs...');
-      try {
-        const status = await browserGet(browser,
-          'https://apiv4.dineoncampus.com/locations/status_by_site?siteId=5751fd2b90975b60e048929a'
-        );
-        const candidateLocs = (status?.locations || []).filter(l =>
-          ALLOWED_HALLS.some(n => l.name?.includes(n))
-        );
-        // For each candidate, fetch its menu directly (the menu endpoint includes period info)
-        const built = [];
-        for (const c of candidateLocs) {
-          try {
-            const menu = await browserGet(browser,
-              `https://apiv4.dineoncampus.com/locations/${c.id}/menu?date=${today}`
-            );
-            if (menu?.menu?.periods?.length || menu?.periods?.length) {
-              built.push({
-                id: c.id,
-                name: c.name,
-                periods: menu.menu?.periods || menu.periods || [],
-              });
-            }
-          } catch (e) {
-            console.warn(`  status_by_site fallback fetch failed for ${c.name}:`, e.message);
+    // Use the new locations-public endpoint (returns full location list grouped by building).
+    // Per-location periods + menu come from /locations/{id}/periods and /locations/{id}/menu.
+    let locations = [];
+    try {
+      const locsData = await browserGet(browser,
+        'https://apiv4.dineoncampus.com/sites/5751fd2b90975b60e048929a/locations-public?for_menus=true'
+      );
+      const flat = (locsData?.buildings || []).flatMap(b => b.locations || []);
+      const filtered = flat.filter(l => ALLOWED_HALLS.some(n => l.name?.includes(n)));
+      // Fetch periods for each filtered location
+      for (const loc of filtered) {
+        try {
+          const periodsData = await browserGet(browser,
+            `https://apiv4.dineoncampus.com/locations/${loc.id}/periods/?date=${today}`
+          );
+          const periods = periodsData?.periods || [];
+          if (periods.length) {
+            locations.push({ id: loc.id, name: loc.name, periods });
+          } else {
+            console.log(`  ${loc.name}: no periods for ${today}`);
           }
+        } catch (e) {
+          console.warn(`  Failed to fetch periods for ${loc.name}:`, e.message);
         }
-        if (built.length) {
-          locations = built;
-          console.log(`Recovered ${built.length} locations via status_by_site fallback.`);
-        }
-      } catch (e) {
-        console.warn('status_by_site fallback failed:', e.message);
       }
+    } catch (e) {
+      console.error('locations-public fetch failed:', e.message);
     }
 
     if (!locations?.length) {
@@ -283,11 +260,11 @@ async function main() {
     await supabase.from('steast_vs_iv')
       .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
 
-    // ── Scrape weekly hours ──────────────────────────────────────────────────
+    // ── Scrape weekly hours (all locations campus-wide, not just menu halls) ─
     console.log('\nFetching weekly hours...');
     try {
       const scheduleData = await browserGet(browser,
-        'https://apiv4.dineoncampus.com/locations/weekly_schedule?siteId=5751fd2b90975b60e048929a'
+        `https://apiv4.dineoncampus.com/locations/weekly_schedule?site_id=5751fd2b90975b60e048929a&date=${today}`
       );
       if (scheduleData?.theLocations?.length) {
         let hoursCount = 0;
