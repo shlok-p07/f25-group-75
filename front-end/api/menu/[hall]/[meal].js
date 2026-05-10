@@ -30,57 +30,62 @@ function mapMeal(slug) {
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
-  const { hall, meal } = req.query;
+  const { hall, meal, date: dateParam } = req.query;
   const locationKeyword = mapHall(hall);
   const periodName = mapMeal(meal);
   const locationPattern = `%${locationKeyword}%`;
 
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  let dateToUse = today;
+  // If a specific date is requested, use it directly (no fallback to old data).
+  // Otherwise default to today with fallback behavior.
+  const isExplicitDate = typeof dateParam === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateParam);
+  let dateToUse = isExplicitDate ? dateParam : today;
 
-  // 1. Find location rows for today
+  // 1. Find location rows for the target date
   let { data: locations, error: locErr } = await supabase
     .from('locations')
     .select('id, name, date')
     .ilike('name', locationPattern)
-    .eq('date', today);
+    .eq('date', dateToUse);
 
   if (locErr) return res.status(500).json({ error: locErr.message });
 
-  // Fallback 1: no location rows at all for today
-  if (!locations || locations.length === 0) {
-    const { data: latest } = await supabase
-      .from('locations')
-      .select('id, name, date')
-      .ilike('name', locationPattern)
-      .lt('date', today)
-      .order('date', { ascending: false })
-      .limit(10);
-    if (latest && latest.length > 0) {
-      locations = latest;
-      dateToUse = latest[0].date;
-    }
-  }
-
-  // Fallback 2: today has location rows but the scrape left no periods
-  // (partial failure — inserts locations then errors out before periods/items)
-  if (locations && locations.length > 0 && dateToUse === today) {
-    const { data: hasPeriods } = await supabase
-      .from('periods')
-      .select('id')
-      .in('location_id', locations.map(l => l.id))
-      .limit(1);
-    if (!hasPeriods || hasPeriods.length === 0) {
-      const { data: prevLocs } = await supabase
+  // Fallback only when no explicit date was requested:
+  // if today has no data, fall back to most recent previous date.
+  if (!isExplicitDate) {
+    if (!locations || locations.length === 0) {
+      const { data: latest } = await supabase
         .from('locations')
         .select('id, name, date')
         .ilike('name', locationPattern)
         .lt('date', today)
         .order('date', { ascending: false })
         .limit(10);
-      if (prevLocs && prevLocs.length > 0) {
-        locations = prevLocs;
-        dateToUse = prevLocs[0].date;
+      if (latest && latest.length > 0) {
+        locations = latest;
+        dateToUse = latest[0].date;
+      }
+    }
+
+    // Today has location rows but no periods (partial scrape failure)
+    if (locations && locations.length > 0 && dateToUse === today) {
+      const { data: hasPeriods } = await supabase
+        .from('periods')
+        .select('id')
+        .in('location_id', locations.map(l => l.id))
+        .limit(1);
+      if (!hasPeriods || hasPeriods.length === 0) {
+        const { data: prevLocs } = await supabase
+          .from('locations')
+          .select('id, name, date')
+          .ilike('name', locationPattern)
+          .lt('date', today)
+          .order('date', { ascending: false })
+          .limit(10);
+        if (prevLocs && prevLocs.length > 0) {
+          locations = prevLocs;
+          dateToUse = prevLocs[0].date;
+        }
       }
     }
   }

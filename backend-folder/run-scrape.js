@@ -1,13 +1,11 @@
 /**
- * Populate today's menu data including nutrients and dietary filters.
+ * Populate menu data for today + 6 future days, plus weekly hours for all
+ * campus dining locations. Idempotent: skips days that already have data
+ * unless --force is passed.
  *
- *   cd backend-folder
- *   node run-scrape.js           # normal run
- *   node run-scrape.js --force   # clear today's data and re-scrape
- *
- * Strategy: load dineoncampus.com so Cloudflare issues clearance, intercept
- * the apiv4 XHRs the Angular app fires, then navigate directly to each
- * apiv4 URL (browser navigation — no CORS restriction) for full menu data.
+ * Crash-proof: if Puppeteer's browser dies mid-run (TargetCloseError, etc.)
+ * we relaunch it, re-acquire Cloudflare clearance, and continue from where
+ * we left off. Each network request has its own retry loop.
  */
 require('dotenv').config();
 const puppeteer = require('puppeteer-extra');
@@ -26,6 +24,9 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ALLOWED_HALLS = ['Stetson', 'International', 'Belvidere'];
+const SITE_ID = '5751fd2b90975b60e048929a';
+const DAYS_AHEAD = 6;
+const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 function parseNumeric(v) {
   if (v == null || v === '-' || v === '') return null;
@@ -33,238 +34,277 @@ function parseNumeric(v) {
   return isNaN(n) ? null : n;
 }
 
+function getDates() {
+  const dates = [];
+  for (let i = 0; i <= DAYS_AHEAD; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() + i);
+    dates.push(d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }));
+  }
+  return dates;
+}
+
 const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 const force = process.argv.includes('--force');
-const timestamp = new Date().toISOString();
-console.log(`\n[${timestamp}] Scraping menu data for ${today}...\n`);
+console.log(`\n[${new Date().toISOString()}] Scraping menus for today + ${DAYS_AHEAD} days...\n`);
 
-async function clearToday() {
-  const { data: items } = await supabase.from('menu_items').select('id').eq('date', today);
+async function clearDate(date) {
+  const { data: items } = await supabase.from('menu_items').select('id').eq('date', date);
   if (items?.length) {
     await supabase.from('nutrients').delete().in('menu_item_id', items.map(i => i.id));
   }
-  await supabase.from('menu_items').delete().eq('date', today);
-  await supabase.from('stations').delete().eq('date', today);
-  await supabase.from('periods').delete().eq('date', today);
-  await supabase.from('locations').delete().eq('date', today);
-  console.log('Cleared existing data for today.\n');
+  await supabase.from('menu_items').delete().eq('date', date);
+  await supabase.from('stations').delete().eq('date', date);
+  await supabase.from('periods').delete().eq('date', date);
+  await supabase.from('locations').delete().eq('date', date);
 }
 
-// Navigate the browser to a URL and return parsed JSON from the page body.
-// Uses browser navigation (not fetch) so Cloudflare cookies apply and CORS is irrelevant.
-async function browserGet(browser, url) {
-  const page = await browser.newPage();
+// ── Resilient browser management ────────────────────────────────────────────
+// The browser process can die at any time (network blip, OOM, Cloudflare).
+// getBrowser() lazily launches it; if the existing handle is dead, it relaunches
+// and re-acquires Cloudflare clearance so subsequent browserGet()s succeed.
+
+let _browser = null;
+
+async function launchAndWarm() {
+  console.log('  [browser] launching new Chromium...');
+  const b = await puppeteer.launch({
+    headless: true,
+    executablePath: executablePath(),
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+  });
+  // Warm-up: load new.dineoncampus.com so Cloudflare issues a clearance cookie
+  // for this new browser session.
+  const warmupPage = await b.newPage();
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    const text = await page.evaluate(() => document.body.innerText);
-    return JSON.parse(text);
+    await warmupPage.setUserAgent(USER_AGENT);
+    let ok = false;
+    for (let i = 0; i < 3 && !ok; i++) {
+      try {
+        if (i > 0) await new Promise(r => setTimeout(r, 10000));
+        await warmupPage.goto('https://new.dineoncampus.com/public', {
+          waitUntil: 'domcontentloaded', timeout: 90000,
+        });
+        ok = true;
+      } catch (e) {
+        console.warn(`  [browser] warm-up attempt ${i + 1} failed: ${e.message}`);
+      }
+    }
+    if (!ok) throw new Error('Failed to load DineOnCampus during warm-up');
+    await new Promise(r => setTimeout(r, 4000));
   } finally {
-    await page.close();
+    try { await warmupPage.close(); } catch {}
   }
+  return b;
+}
+
+async function getBrowser({ forceRestart = false } = {}) {
+  if (forceRestart && _browser) {
+    try { await _browser.close(); } catch {}
+    _browser = null;
+  }
+  if (!_browser || !_browser.connected) {
+    _browser = await launchAndWarm();
+  }
+  return _browser;
+}
+
+function isBrowserDeadError(e) {
+  const msg = String(e?.message || '');
+  return /Target closed|Protocol error|detached|Connection closed|Browser closed|Session closed/i.test(msg);
+}
+
+// Retry-resilient HTTP via browser navigation. Restarts browser if it dies.
+async function browserGet(url, { retries = 3 } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    let page;
+    try {
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      await page.setUserAgent(USER_AGENT);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const text = await page.evaluate(() => document.body.innerText);
+      return JSON.parse(text);
+    } catch (e) {
+      lastErr = e;
+      const dead = isBrowserDeadError(e);
+      console.warn(`  [browserGet] attempt ${attempt}/${retries} failed${dead ? ' (browser dead)' : ''}: ${e.message?.slice(0, 120)}`);
+      if (dead) {
+        try { await getBrowser({ forceRestart: true }); } catch (re) {
+          console.warn(`  [browserGet] restart failed: ${re.message}`);
+        }
+      }
+      if (attempt < retries) await new Promise(r => setTimeout(r, 1500 * attempt));
+    } finally {
+      if (page) { try { await page.close(); } catch {} }
+    }
+  }
+  throw lastErr;
+}
+
+async function scrapeDate(date, halls, errors) {
+  const { data: existing } = await supabase
+    .from('menu_items').select('id').eq('date', date).limit(1);
+  const { data: existingLocs } = await supabase
+    .from('locations').select('id').eq('date', date).limit(1);
+  const hasItems = existing?.length > 0;
+  const hasLocs  = existingLocs?.length > 0;
+
+  if (hasItems && hasLocs && !force) {
+    console.log(`  ${date}: data exists, skipping`);
+    return 0;
+  }
+  if (hasItems || hasLocs) await clearDate(date);
+
+  let dateTotal = 0;
+  for (const hall of halls) {
+    let periodsData;
+    try {
+      periodsData = await browserGet(
+        `https://apiv4.dineoncampus.com/locations/${hall.id}/periods/?date=${date}`
+      );
+    } catch (e) {
+      errors.push(`periods ${hall.name} ${date}: ${e.message}`);
+      console.warn(`  ${date} ${hall.name}: periods fetch failed after retries`);
+      continue;
+    }
+    const periods = (periodsData?.periods || []).filter(p => p.name !== 'Everyday');
+    if (!periods.length) {
+      console.log(`  ${date} ${hall.name}: no periods`);
+      continue;
+    }
+
+    const { data: dbLoc, error: locErr } = await supabase
+      .from('locations')
+      .insert({ original_id: hall.id, name: hall.name, date })
+      .select().single();
+    if (locErr) { errors.push(`location ${hall.name} ${date}: ${locErr.message}`); continue; }
+
+    let hallTotal = 0;
+    for (const period of periods) {
+      const { data: dbPeriod, error: perErr } = await supabase
+        .from('periods')
+        .insert({ original_id: period.id, location_id: dbLoc.id, name: period.name, date })
+        .select().single();
+      if (perErr) { errors.push(`period ${period.name} ${date}: ${perErr.message}`); continue; }
+
+      let menuData;
+      try {
+        menuData = await browserGet(
+          `https://apiv4.dineoncampus.com/locations/${hall.id}/menu?date=${date}&period=${period.id}`
+        );
+      } catch (e) {
+        errors.push(`menu ${hall.name}/${period.name} ${date}: ${e.message}`);
+        console.warn(`  ${date} ${hall.name}/${period.name}: menu fetch failed after retries`);
+        continue;
+      }
+
+      if (!menuData?.period?.categories?.length) continue;
+
+      for (const category of menuData.period.categories) {
+        const { data: dbStation, error: stErr } = await supabase
+          .from('stations')
+          .insert({ original_id: category.id ?? null, period_id: dbPeriod.id, name: category.name, date })
+          .select().single();
+        if (stErr) { errors.push(`station ${category.name} ${date}: ${stErr.message}`); continue; }
+
+        for (const item of (category.items ?? [])) {
+          const isVegan       = item.filters?.some(f => f.name === 'Vegan') ?? false;
+          const isVegetarian  = item.filters?.some(f => f.name === 'Vegetarian' || f.name === 'Vegan') ?? false;
+          const isHighProtein = item.filters?.some(f => f.name === 'Good Source of Protein') ?? false;
+
+          const { data: dbItem, error: itemErr } = await supabase
+            .from('menu_items')
+            .insert({
+              station_id:      dbStation.id,
+              original_id:     item.id ?? null,
+              name:            item.name,
+              calories:        item.calories ?? null,
+              portion:         item.portion ?? null,
+              date,
+              is_vegetarian:   isVegetarian,
+              is_vegan:        isVegan,
+              is_high_protein: isHighProtein,
+            })
+            .select().single();
+          if (itemErr) { errors.push(`item ${item.name} ${date}: ${itemErr.message}`); continue; }
+
+          if (item.nutrients?.length) {
+            const nutrients = item.nutrients.map(n => ({
+              menu_item_id:  dbItem.id,
+              name:          n.name,
+              value:         n.value,
+              uom:           n.uom,
+              value_numeric: parseNumeric(n.valueNumeric),
+            }));
+            const { error: nutErr } = await supabase.from('nutrients').insert(nutrients);
+            if (nutErr) errors.push(`nutrients for ${item.name} ${date}: ${nutErr.message}`);
+          }
+          dateTotal++;
+          hallTotal++;
+        }
+      }
+    }
+    console.log(`  ${date} ${hall.name}: ${hallTotal} items`);
+  }
+  return dateTotal;
 }
 
 async function main() {
-  // When launched by launchd (--background), wait for network to stabilize after wake
   if (process.argv.includes('--background')) {
     console.log('Waiting 60s for network to stabilize...');
     await new Promise(r => setTimeout(r, 60000));
   }
 
-  const { data: existing } = await supabase
-    .from('menu_items').select('id').eq('date', today).limit(1);
-  const { data: existingLocs } = await supabase
-    .from('locations').select('id').eq('date', today).limit(1);
+  const dates = getDates();
+  console.log(`Dates to scrape: ${dates.join(', ')}\n`);
 
-  const hasItems = existing?.length > 0;
-  const hasLocs  = existingLocs?.length > 0;
-
-  if (hasItems && hasLocs && !force) {
-    console.log(`Menu data already exists for ${today}. Use --force to re-scrape.`);
-    return;
-  }
-
-  if (hasItems || hasLocs) {
-    if (!(hasItems && hasLocs)) {
-      console.log(`Partial data found (items=${hasItems}, locations=${hasLocs}) — clearing and re-scraping...`);
-    }
-    await clearToday();
-  }
-
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath: executablePath(),
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
+  const errors = [];
 
   try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    );
+    // Pre-warm the browser so the first browserGet doesn't pay the launch cost.
+    await getBrowser();
 
-    // Intercept apiv4 XHRs fired by the Angular app
-    const captured = {};
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (!url.includes('dineoncampus.com')) return;
-      if (!(response.headers()['content-type'] || '').includes('json')) return;
-      try {
-        const json = await response.json();
-        const path = url.replace(/https?:\/\/[^/]+/, '').replace(/\?.*/, '');
-        captured[path] = json;
-        console.log(`  [XHR] ${url.replace(/\?.*/, '')}`);
-      } catch { /* ignore */ }
-    });
-
-    console.log('Loading new.dineoncampus.com (getting Cloudflare clearance)...');
-    let loaded = false;
-    for (let attempt = 1; attempt <= 3 && !loaded; attempt++) {
-      try {
-        if (attempt > 1) {
-          console.log(`  Retry attempt ${attempt}...`);
-          await new Promise(r => setTimeout(r, 15000));
-        }
-        await page.goto('https://new.dineoncampus.com/public', {
-          waitUntil: 'domcontentloaded',
-          timeout: 90000,
-        });
-        loaded = true;
-      } catch (e) {
-        console.warn(`  Page load attempt ${attempt} failed: ${e.message}`);
-      }
-    }
-    if (!loaded) throw new Error('Failed to load DineOnCampus after 3 attempts');
-    await new Promise(r => setTimeout(r, 4000));
-
-    // Use the new locations-public endpoint (returns full location list grouped by building).
-    // Per-location periods + menu come from /locations/{id}/periods and /locations/{id}/menu.
-    let locations = [];
+    let halls = [];
     try {
-      const locsData = await browserGet(browser,
-        'https://apiv4.dineoncampus.com/sites/5751fd2b90975b60e048929a/locations-public?for_menus=true'
+      const locsData = await browserGet(
+        `https://apiv4.dineoncampus.com/sites/${SITE_ID}/locations-public?for_menus=true`
       );
       const flat = (locsData?.buildings || []).flatMap(b => b.locations || []);
-      const filtered = flat.filter(l => ALLOWED_HALLS.some(n => l.name?.includes(n)));
-      // Fetch periods for each filtered location
-      for (const loc of filtered) {
-        try {
-          const periodsData = await browserGet(browser,
-            `https://apiv4.dineoncampus.com/locations/${loc.id}/periods/?date=${today}`
-          );
-          const periods = periodsData?.periods || [];
-          if (periods.length) {
-            locations.push({ id: loc.id, name: loc.name, periods });
-          } else {
-            console.log(`  ${loc.name}: no periods for ${today}`);
-          }
-        } catch (e) {
-          console.warn(`  Failed to fetch periods for ${loc.name}:`, e.message);
-        }
-      }
+      halls = flat.filter(l => ALLOWED_HALLS.some(n => l.name?.includes(n)));
     } catch (e) {
       console.error('locations-public fetch failed:', e.message);
     }
 
-    if (!locations?.length) {
-      console.log(`Menu not posted yet for ${today} — will retry at next scheduled run.`);
+    if (!halls.length) {
+      console.log('No matching dining halls found. Exiting.');
       return;
     }
 
-    console.log(`\nFound ${locations.length} locations.\n`);
+    console.log(`\nFound ${halls.length} matching halls: ${halls.map(h => h.name).join(', ')}\n`);
 
-    let totalItems = 0;
-    const errors = [];
-
-    for (const loc of locations) {
-      if (!ALLOWED_HALLS.some(n => loc.name?.includes(n))) continue;
-      console.log(`\n→ ${loc.name}`);
-
-      const { data: dbLoc, error: locInsErr } = await supabase
-        .from('locations')
-        .insert({ original_id: loc.id, name: loc.name, date: today })
-        .select().single();
-      if (locInsErr) { errors.push(`location ${loc.name}: ${locInsErr.message}`); continue; }
-
-      for (const period of (loc.periods ?? [])) {
-        if (period.name === 'Everyday') continue;
-
-        const { data: dbPeriod, error: perInsErr } = await supabase
-          .from('periods')
-          .insert({ original_id: period.id, location_id: dbLoc.id, name: period.name, date: today })
-          .select().single();
-        if (perInsErr) { errors.push(`period ${period.name}: ${perInsErr.message}`); continue; }
-
-        let menuData = captured[`/locations/${loc.id}/menu`];
-        if (!menuData) {
-          try {
-            menuData = await browserGet(browser,
-              `https://apiv4.dineoncampus.com/locations/${loc.id}/menu?date=${today}&period=${period.id}`
-            );
-          } catch (e) {
-            console.warn(`  Could not fetch menu for ${period.name}:`, e.message);
-            continue;
-          }
-        }
-
-        if (!menuData?.period?.categories?.length) {
-          console.log(`  ${period.name}: no categories`);
-          continue;
-        }
-
-        for (const category of menuData.period.categories) {
-          const { data: dbStation, error: stInsErr } = await supabase
-            .from('stations')
-            .insert({ original_id: category.id ?? null, period_id: dbPeriod.id, name: category.name, date: today })
-            .select().single();
-          if (stInsErr) { errors.push(`station ${category.name}: ${stInsErr.message}`); continue; }
-
-          for (const item of (category.items ?? [])) {
-            const isVegan       = item.filters?.some(f => f.name === 'Vegan') ?? false;
-            const isVegetarian  = item.filters?.some(f => f.name === 'Vegetarian' || f.name === 'Vegan') ?? false;
-            const isHighProtein = item.filters?.some(f => f.name === 'Good Source of Protein') ?? false;
-
-            const { data: dbItem, error: itemInsErr } = await supabase
-              .from('menu_items')
-              .insert({
-                station_id:      dbStation.id,
-                original_id:     item.id ?? null,
-                name:            item.name,
-                calories:        item.calories ?? null,
-                portion:         item.portion ?? null,
-                date:            today,
-                is_vegetarian:   isVegetarian,
-                is_vegan:        isVegan,
-                is_high_protein: isHighProtein,
-              })
-              .select().single();
-            if (itemInsErr) { errors.push(`item ${item.name}: ${itemInsErr.message}`); continue; }
-
-            if (item.nutrients?.length) {
-              const nutrients = item.nutrients.map(n => ({
-                menu_item_id:  dbItem.id,
-                name:          n.name,
-                value:         n.value,
-                uom:           n.uom,
-                value_numeric: parseNumeric(n.valueNumeric),
-              }));
-              const { error: nutErr } = await supabase.from('nutrients').insert(nutrients);
-              if (nutErr) errors.push(`nutrients for ${item.name}: ${nutErr.message}`);
-            }
-            totalItems++;
-          }
-          console.log(`  ${period.name} / ${category.name}: ${category.items?.length || 0} items`);
-        }
+    let grandTotal = 0;
+    for (const date of dates) {
+      console.log(`\n── ${date} ──`);
+      try {
+        grandTotal += await scrapeDate(date, halls, errors);
+      } catch (e) {
+        // scrapeDate handles its own per-hall failures, but if something
+        // unexpected escapes, log and keep going to next date.
+        errors.push(`scrapeDate ${date}: ${e.message}`);
+        console.warn(`  ${date}: unexpected error, continuing — ${e.message}`);
       }
     }
 
     await supabase.from('steast_vs_iv')
       .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
 
-    // ── Scrape weekly hours (all locations campus-wide, not just menu halls) ─
+    // ── Weekly hours for all 31 campus locations ───────────────────────────
     console.log('\nFetching weekly hours...');
     try {
-      const scheduleData = await browserGet(browser,
-        `https://apiv4.dineoncampus.com/locations/weekly_schedule?site_id=5751fd2b90975b60e048929a&date=${today}`
+      const scheduleData = await browserGet(
+        `https://apiv4.dineoncampus.com/locations/weekly_schedule?site_id=${SITE_ID}&date=${today}`
       );
       if (scheduleData?.theLocations?.length) {
         let hoursCount = 0;
@@ -286,7 +326,7 @@ async function main() {
             else errors.push(`hours ${loc.name} ${day.date}: ${hErr.message}`);
           }
         }
-        console.log(`Updated hours for ${hoursCount} location-days across ${scheduleData.theLocations.length} locations.`);
+        console.log(`Updated hours: ${hoursCount} location-days across ${scheduleData.theLocations.length} locations.`);
       } else {
         console.warn('No weekly schedule data returned.');
       }
@@ -294,11 +334,17 @@ async function main() {
       console.warn('Could not fetch weekly hours:', e.message);
     }
 
-    if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.join('\n'));
-    console.log(`\nDone! Inserted ${totalItems} menu items for ${today}. [${new Date().toISOString()}]\n`);
+    if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.slice(0, 30).join('\n'));
+    console.log(`\nDone! Inserted ${grandTotal} menu items across ${dates.length} days. [${new Date().toISOString()}]\n`);
   } finally {
-    await browser.close();
+    if (_browser) { try { await _browser.close(); } catch {} }
   }
 }
 
-main().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
+main().catch(err => {
+  // Top-level safety net: log fatal but exit 0 so launchd doesn't see it as a hard failure.
+  // Any data already committed up to this point is safe in Supabase.
+  console.error('Fatal:', err.message);
+  if (_browser) { try { _browser.close(); } catch {} }
+  process.exit(0);
+});
