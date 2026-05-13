@@ -1,25 +1,17 @@
 {
   "name": "backend-folder",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Local backup scraper — runs via launchd as a safety net for the Vercel cloud cron (front-end/api/scrape.js). Populates Supabase with menu data + weekly hours for the next 7 days from new.dineoncampus.com.",
+  "main": "run-scrape.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "scrape": "node run-scrape.js",
+    "scrape:force": "node run-scrape.js --force"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
-    "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "express": "^5.1.0",
     "puppeteer": "^24.30.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.10"
   }
 }

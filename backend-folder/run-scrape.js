@@ -65,36 +65,38 @@ async function clearDate(date) {
 // and re-acquires Cloudflare clearance so subsequent browserGet()s succeed.
 
 let _browser = null;
+let _sharedPage = null;
 
 async function launchAndWarm() {
   console.log('  [browser] launching new Chromium...');
   const b = await puppeteer.launch({
     headless: true,
     executablePath: executablePath(),
+    protocolTimeout: 60000, // give CDP calls 60s before they fail (default 30s is too tight under load)
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
-  // Warm-up: load new.dineoncampus.com so Cloudflare issues a clearance cookie
-  // for this new browser session.
-  const warmupPage = await b.newPage();
-  try {
-    await warmupPage.setUserAgent(USER_AGENT);
-    let ok = false;
-    for (let i = 0; i < 3 && !ok; i++) {
-      try {
-        if (i > 0) await new Promise(r => setTimeout(r, 10000));
-        await warmupPage.goto('https://new.dineoncampus.com/public', {
-          waitUntil: 'domcontentloaded', timeout: 90000,
-        });
-        ok = true;
-      } catch (e) {
-        console.warn(`  [browser] warm-up attempt ${i + 1} failed: ${e.message}`);
-      }
+  // Warm-up: load new.dineoncampus.com so Cloudflare issues a clearance cookie.
+  // The page returned here is reused for ALL subsequent navigations
+  // (much faster + avoids the stealth-plugin overhead of creating new pages 100+ times).
+  const page = await b.newPage();
+  await page.setUserAgent(USER_AGENT);
+
+  let ok = false;
+  for (let i = 0; i < 3 && !ok; i++) {
+    try {
+      if (i > 0) await new Promise(r => setTimeout(r, 10000));
+      await page.goto('https://new.dineoncampus.com/public', {
+        waitUntil: 'domcontentloaded', timeout: 90000,
+      });
+      ok = true;
+    } catch (e) {
+      console.warn(`  [browser] warm-up attempt ${i + 1} failed: ${e.message}`);
     }
-    if (!ok) throw new Error('Failed to load DineOnCampus during warm-up');
-    await new Promise(r => setTimeout(r, 4000));
-  } finally {
-    try { await warmupPage.close(); } catch {}
   }
+  if (!ok) throw new Error('Failed to load DineOnCampus during warm-up');
+  await new Promise(r => setTimeout(r, 4000));
+
+  _sharedPage = page;
   return b;
 }
 
@@ -102,6 +104,7 @@ async function getBrowser({ forceRestart = false } = {}) {
   if (forceRestart && _browser) {
     try { await _browser.close(); } catch {}
     _browser = null;
+    _sharedPage = null;
   }
   if (!_browser || !_browser.connected) {
     _browser = await launchAndWarm();
@@ -111,20 +114,22 @@ async function getBrowser({ forceRestart = false } = {}) {
 
 function isBrowserDeadError(e) {
   const msg = String(e?.message || '');
-  return /Target closed|Protocol error|detached|Connection closed|Browser closed|Session closed/i.test(msg);
+  return /Target closed|Protocol error|detached|Connection closed|Browser closed|Session closed|timed out/i.test(msg);
 }
 
-// Retry-resilient HTTP via browser navigation. Restarts browser if it dies.
+// Retry-resilient HTTP via browser navigation, reusing one shared page.
+// Restarts browser+page if either dies. ~50× faster than newPage()/close() each time.
 async function browserGet(url, { retries = 3 } = {}) {
   let lastErr;
   for (let attempt = 1; attempt <= retries; attempt++) {
-    let page;
     try {
-      const browser = await getBrowser();
-      page = await browser.newPage();
-      await page.setUserAgent(USER_AGENT);
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      const text = await page.evaluate(() => document.body.innerText);
+      await getBrowser();
+      if (!_sharedPage || _sharedPage.isClosed()) {
+        _sharedPage = await _browser.newPage();
+        await _sharedPage.setUserAgent(USER_AGENT);
+      }
+      await _sharedPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const text = await _sharedPage.evaluate(() => document.body.innerText);
       return JSON.parse(text);
     } catch (e) {
       lastErr = e;
@@ -136,8 +141,6 @@ async function browserGet(url, { retries = 3 } = {}) {
         }
       }
       if (attempt < retries) await new Promise(r => setTimeout(r, 1500 * attempt));
-    } finally {
-      if (page) { try { await page.close(); } catch {} }
     }
   }
   throw lastErr;

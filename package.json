@@ -23,12 +23,8 @@
     },
     "type": "module",
     "scripts": {
-        "dev": "concurrently --names \"API,UI\" --prefix-colors \"magenta.bold,cyan.bold\" --kill-others-on-fail \"npm run dev --prefix backend-folder\" \"npm run dev --prefix front-end\"",
-        "dev:backend": "npm run dev --prefix backend-folder",
-        "dev:frontend": "npm run dev --prefix front-end",
-        "scrape": "node backend-folder/run-scrape.js"
-    },
-    "devDependencies": {
-        "concurrently": "^8.2.0"
+        "dev": "npm run dev --prefix front-end",
+        "scrape": "node backend-folder/run-scrape.js",
+        "scrape:force": "node backend-folder/run-scrape.js --force"
     }
 }
