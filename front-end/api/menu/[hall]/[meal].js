@@ -36,94 +36,88 @@ export default async function handler(req, res) {
   const locationPattern = `%${locationKeyword}%`;
 
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  // If a specific date is requested, use it directly (no fallback to old data).
-  // Otherwise default to today with fallback behavior.
+  // If a specific date is requested, use only that date (no fallback).
+  // Otherwise default to today, then fall FORWARD to the nearest upcoming day
+  // that actually has this meal (menus are pre-loaded ~a week ahead), and only
+  // fall back to recent past days as a last resort.
   const isExplicitDate = typeof dateParam === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateParam);
-  let dateToUse = isExplicitDate ? dateParam : today;
 
-  // 1. Find location rows for the target date
-  let { data: locations, error: locErr } = await supabase
-    .from('locations')
-    .select('id, name, date')
-    .ilike('name', locationPattern)
-    .eq('date', dateToUse);
-
-  if (locErr) return res.status(500).json({ error: locErr.message });
-
-  // Fallback only when no explicit date was requested:
-  // if today has no data, fall back to most recent previous date.
-  if (!isExplicitDate) {
-    if (!locations || locations.length === 0) {
-      const { data: latest } = await supabase
+  // 1. Build the ordered list of candidate dates to try.
+  let candidateDates;
+  if (isExplicitDate) {
+    candidateDates = [dateParam];
+  } else {
+    const [{ data: upcoming }, { data: past }] = await Promise.all([
+      supabase
         .from('locations')
-        .select('id, name, date')
+        .select('date')
+        .ilike('name', locationPattern)
+        .gte('date', today)
+        .order('date', { ascending: true })
+        .limit(21),
+      supabase
+        .from('locations')
+        .select('date')
         .ilike('name', locationPattern)
         .lt('date', today)
         .order('date', { ascending: false })
-        .limit(10);
-      if (latest && latest.length > 0) {
-        locations = latest;
-        dateToUse = latest[0].date;
-      }
-    }
-
-    // Today has location rows but no periods (partial scrape failure)
-    if (locations && locations.length > 0 && dateToUse === today) {
-      const { data: hasPeriods } = await supabase
-        .from('periods')
-        .select('id')
-        .in('location_id', locations.map(l => l.id))
-        .limit(1);
-      if (!hasPeriods || hasPeriods.length === 0) {
-        const { data: prevLocs } = await supabase
-          .from('locations')
-          .select('id, name, date')
-          .ilike('name', locationPattern)
-          .lt('date', today)
-          .order('date', { ascending: false })
-          .limit(10);
-        if (prevLocs && prevLocs.length > 0) {
-          locations = prevLocs;
-          dateToUse = prevLocs[0].date;
-        }
-      }
+        .limit(21),
+    ]);
+    const seen = new Set();
+    candidateDates = [];
+    // today + upcoming first (ascending), then most-recent past (descending)
+    for (const row of [...(upcoming ?? []), ...(past ?? [])]) {
+      if (!seen.has(row.date)) { seen.add(row.date); candidateDates.push(row.date); }
     }
   }
 
-  if (!locations || locations.length === 0) {
+  if (candidateDates.length === 0) {
     return res.status(404).json({
       error: 'hall_closed',
       message: `No data found for ${locationKeyword}.`,
     });
   }
 
-  // 2. Find a location+period that has stations for dateToUse
+  // 2. Use the first candidate date that has this location + period + stations.
   let location = null;
   let period = null;
+  let dateToUse = null;
 
-  for (const loc of locations) {
-    const { data: periods } = await supabase
-      .from('periods')
+  for (const d of candidateDates) {
+    const { data: locs, error: locErr } = await supabase
+      .from('locations')
       .select('id, name, date')
-      .eq('location_id', loc.id)
-      .eq('name', periodName)
-      .eq('date', dateToUse);
+      .ilike('name', locationPattern)
+      .eq('date', d);
+    if (locErr) return res.status(500).json({ error: locErr.message });
+    if (!locs || locs.length === 0) continue;
 
-    if (!periods || periods.length === 0) continue;
+    for (const loc of locs) {
+      const { data: periods } = await supabase
+        .from('periods')
+        .select('id, name, date')
+        .eq('location_id', loc.id)
+        .eq('name', periodName)
+        .eq('date', d);
 
-    for (const p of periods) {
-      const { data: stationCheck } = await supabase
-        .from('stations')
-        .select('id')
-        .eq('period_id', p.id)
-        .eq('date', dateToUse)
-        .limit(1);
+      if (!periods || periods.length === 0) continue;
 
-      if (stationCheck && stationCheck.length > 0) {
-        location = loc;
-        period = p;
-        break;
+      for (const p of periods) {
+        const { data: stationCheck } = await supabase
+          .from('stations')
+          .select('id')
+          .eq('period_id', p.id)
+          .eq('date', d)
+          .limit(1);
+
+        if (stationCheck && stationCheck.length > 0) {
+          location = loc;
+          period = p;
+          dateToUse = d;
+          break;
+        }
       }
+      if (period) break;
     }
     if (period) break;
   }
@@ -131,7 +125,7 @@ export default async function handler(req, res) {
   if (!period) {
     return res.status(404).json({
       error: 'meal_not_posted',
-      message: `No ${periodName} menu found for ${locationKeyword} on ${dateToUse}.`,
+      message: `No ${periodName} menu found for ${locationKeyword}.`,
     });
   }
 
