@@ -20,7 +20,15 @@ import { createClient } from '@supabase/supabase-js';
 
 const ALLOWED_HALLS = ['Stetson', 'International', 'Belvidere'];
 const SITE_ID = '5751fd2b90975b60e048929a';
-const DAYS_AHEAD = 6;
+// DineOnCampus publishes menus weeks/months out. Scrape a large forward window so a
+// multi-day scraper outage (Cloudflare block, proxy quota, etc.) doesn't leave upcoming
+// days with no menu at all — there's already a buffer of previously-scraped future dates.
+const DAYS_AHEAD = 29;
+// Cap how many *not-yet-complete* dates get (re)scraped per invocation. Without this, a
+// large window (or catching up after an outage) could try to scrape dozens of dates in
+// one 300s function call, risking a timeout and burning the whole monthly ZenRows quota
+// in one run. Capping means catch-up happens gradually across several daily runs instead.
+const MAX_DATES_PER_RUN = 6;
 
 function parseNumeric(v) {
   if (v == null || v === '-' || v === '') return null;
@@ -91,17 +99,19 @@ async function clearDate(supabase, date) {
 }
 
 async function scrapeDate(supabase, date, halls, force, errors) {
-  const { data: existing } = await supabase
-    .from('menu_items').select('id').eq('date', date).limit(1);
+  if (!force) {
+    const { data: status } = await supabase
+      .from('scrape_status').select('complete').eq('date', date).maybeSingle();
+    if (status?.complete) return null; // already fully scraped — doesn't count against the per-run cap
+  }
+
   const { data: existingLocs } = await supabase
     .from('locations').select('id').eq('date', date).limit(1);
-  const hasItems = existing?.length > 0;
-  const hasLocs  = existingLocs?.length > 0;
+  if (existingLocs?.length) await clearDate(supabase, date);
 
-  if (hasItems && hasLocs && !force) return 0;
-  if (hasItems || hasLocs) await clearDate(supabase, date);
-
+  const errorsBefore = errors.length;
   let dateTotal = 0;
+  try {
   for (const hall of halls) {
     let periodsData;
     try {
@@ -186,6 +196,23 @@ async function scrapeDate(supabase, date, halls, force, errors) {
       }
     }
   }
+  } catch (e) {
+    // Ensures the scrape_status upsert below still runs even on an unexpected throw —
+    // otherwise a stale "complete" row from a prior success would wrongly cause this
+    // date to be skipped forever on future runs, despite clearDate() already having
+    // wiped its data above.
+    errors.push(`date ${date}: ${e.message}`);
+  }
+
+  const dateErrors = errors.slice(errorsBefore);
+  await supabase.from('scrape_status').upsert({
+    date,
+    complete: dateErrors.length === 0,
+    error_count: dateErrors.length,
+    last_errors: dateErrors,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'date' });
+
   return dateTotal;
 }
 
@@ -203,6 +230,16 @@ export default async function handler(req, res) {
   const today = dates[0];
   console.log(`[cloud-scrape] starting for dates: ${dates.join(', ')}`);
 
+  // Heartbeat: touch the DB before anything that can fail downstream (ZenRows/Cloudflare).
+  // Free-tier Supabase projects auto-pause after 7 days with zero API activity — if the
+  // scrape below throws before reaching a query, this guarantees the cron still counts
+  // as activity every day it runs, regardless of whether scraping itself succeeds.
+  try {
+    await supabase.from('locations').select('id').limit(1);
+  } catch (e) {
+    console.error('[cloud-scrape] heartbeat query failed:', e.message);
+  }
+
   // 1. Get hall list
   let halls = [];
   try {
@@ -217,12 +254,16 @@ export default async function handler(req, res) {
 
   console.log(`[cloud-scrape] ${halls.length} halls: ${halls.map(h => h.name).join(', ')}`);
 
-  // 2. Scrape menus per date
+  // 2. Scrape menus per date — soonest dates first, capped per run (see MAX_DATES_PER_RUN)
   const errors = [];
   let grandTotal = 0;
+  let scrapedCount = 0;
   for (const date of dates) {
+    if (scrapedCount >= MAX_DATES_PER_RUN) break;
     try {
       const count = await scrapeDate(supabase, date, halls, force, errors);
+      if (count === null) continue; // already complete, didn't count against the cap
+      scrapedCount++;
       grandTotal += count;
       console.log(`[cloud-scrape] ${date}: ${count} items`);
     } catch (e) {
