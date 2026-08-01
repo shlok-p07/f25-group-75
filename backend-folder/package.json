@@ -1,7 +1,7 @@
 {
   "name": "backend-folder",
   "version": "1.0.0",
-  "description": "Local backup scraper — runs via launchd as a safety net for the Vercel cloud cron (front-end/api/scrape.js). Populates Supabase with menu data + weekly hours for the next 7 days from new.dineoncampus.com.",
+  "description": "Puppeteer + stealth scraper, run on a schedule via GitHub Actions (.github/workflows/daily-scrape.yml) as the primary scraper, with the Vercel cron (front-end/api/scrape.js) as a secondary heartbeat/backup. Populates Supabase with menu data + weekly hours from new.dineoncampus.com.",
   "main": "run-scrape.js",
   "scripts": {
     "scrape": "node run-scrape.js",

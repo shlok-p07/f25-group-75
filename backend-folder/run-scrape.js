@@ -25,7 +25,12 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ALLOWED_HALLS = ['Stetson', 'International', 'Belvidere'];
 const SITE_ID = '5751fd2b90975b60e048929a';
-const DAYS_AHEAD = 6;
+// DineOnCampus publishes menus weeks/months out — scrape a large forward window so a
+// multi-day outage doesn't leave upcoming days with no menu (see scrape_status below).
+const DAYS_AHEAD = 29;
+// Cap how many not-yet-complete dates get (re)scraped per run so catching up after an
+// outage happens gradually across runs instead of one very long single invocation.
+const MAX_DATES_PER_RUN = 10;
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 function parseNumeric(v) {
@@ -147,20 +152,22 @@ async function browserGet(url, { retries = 3 } = {}) {
 }
 
 async function scrapeDate(date, halls, errors) {
-  const { data: existing } = await supabase
-    .from('menu_items').select('id').eq('date', date).limit(1);
+  if (!force) {
+    const { data: status } = await supabase
+      .from('scrape_status').select('complete').eq('date', date).maybeSingle();
+    if (status?.complete) {
+      console.log(`  ${date}: already complete, skipping`);
+      return null; // doesn't count against the per-run cap
+    }
+  }
+
   const { data: existingLocs } = await supabase
     .from('locations').select('id').eq('date', date).limit(1);
-  const hasItems = existing?.length > 0;
-  const hasLocs  = existingLocs?.length > 0;
+  if (existingLocs?.length) await clearDate(date);
 
-  if (hasItems && hasLocs && !force) {
-    console.log(`  ${date}: data exists, skipping`);
-    return 0;
-  }
-  if (hasItems || hasLocs) await clearDate(date);
-
+  const errorsBefore = errors.length;
   let dateTotal = 0;
+  try {
   for (const hall of halls) {
     let periodsData;
     try {
@@ -251,6 +258,22 @@ async function scrapeDate(date, halls, errors) {
     }
     console.log(`  ${date} ${hall.name}: ${hallTotal} items`);
   }
+  } catch (e) {
+    // Ensures the scrape_status upsert below still runs even on an unexpected throw —
+    // otherwise a stale "complete" row from a prior success would wrongly skip this
+    // date forever, despite clearDate() already having wiped its data above.
+    errors.push(`date ${date}: ${e.message}`);
+  }
+
+  const dateErrors = errors.slice(errorsBefore);
+  await supabase.from('scrape_status').upsert({
+    date,
+    complete: dateErrors.length === 0,
+    error_count: dateErrors.length,
+    last_errors: dateErrors,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'date' });
+
   return dateTotal;
 }
 
@@ -288,10 +311,18 @@ async function main() {
     console.log(`\nFound ${halls.length} matching halls: ${halls.map(h => h.name).join(', ')}\n`);
 
     let grandTotal = 0;
+    let scrapedCount = 0;
     for (const date of dates) {
+      if (scrapedCount >= MAX_DATES_PER_RUN) {
+        console.log(`\nReached per-run cap (${MAX_DATES_PER_RUN} dates) — remaining dates will be picked up next run.`);
+        break;
+      }
       console.log(`\n── ${date} ──`);
       try {
-        grandTotal += await scrapeDate(date, halls, errors);
+        const count = await scrapeDate(date, halls, errors);
+        if (count === null) continue; // already complete, didn't count against the cap
+        scrapedCount++;
+        grandTotal += count;
       } catch (e) {
         // scrapeDate handles its own per-hall failures, but if something
         // unexpected escapes, log and keep going to next date.

@@ -1,0 +1,38 @@
+name: Daily dining hall scrape
+
+# Primary scraper: runs headless Chrome + stealth directly (no proxy quota to run out of,
+# unlike the Vercel cron's ZenRows dependency in front-end/api/scrape.js, which is kept
+# only as a Supabase heartbeat/backup).
+#
+# Caveat: GitHub disables scheduled workflows after 60 days with no repo activity — if the
+# repo goes quiet for two months, this stops firing until someone pushes a commit or
+# manually re-enables it in the Actions tab.
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend-folder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend-folder/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node run-scrape.js
