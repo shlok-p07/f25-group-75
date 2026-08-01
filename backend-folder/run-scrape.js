@@ -1,7 +1,11 @@
 /**
- * Populate menu data for today + 6 future days, plus weekly hours for all
- * campus dining locations. Idempotent: skips days that already have data
- * unless --force is passed.
+ * Populate menu data for today + 29 future days, plus weekly hours for all
+ * campus dining locations. Idempotent: skips dates already marked complete in
+ * scrape_status, unless --force is passed. The first FORCE_REFRESH_DAYS dates
+ * are always re-scraped regardless (dining halls can edit a menu after first
+ * publishing it), and each run only advances MAX_DATES_PER_RUN dates forward
+ * through the window so the 8x/day launchd schedule progressively fills the
+ * 30-day buffer instead of resetting to day 0 every time.
  *
  * Crash-proof: if Puppeteer's browser dies mid-run (TargetCloseError, etc.)
  * we relaunch it, re-acquire Cloudflare clearance, and continue from where
@@ -31,6 +35,11 @@ const DAYS_AHEAD = 29;
 // Cap how many not-yet-complete dates get (re)scraped per run so catching up after an
 // outage happens gradually across runs instead of one very long single invocation.
 const MAX_DATES_PER_RUN = 10;
+// Dining halls can edit today's/tomorrow's menu after it's first published, so these
+// dates are always re-scraped regardless of scrape_status, even without --force. This
+// runs 8x/day via launchd (com.nudining.scrape.plist), so it stays fresh without needing
+// the whole 30-day window to be forced every run (which would never let the buffer build).
+const FORCE_REFRESH_DAYS = 2;
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 function parseNumeric(v) {
@@ -151,8 +160,8 @@ async function browserGet(url, { retries = 3 } = {}) {
   throw lastErr;
 }
 
-async function scrapeDate(date, halls, errors) {
-  if (!force) {
+async function scrapeDate(date, halls, errors, forceThisDate) {
+  if (!forceThisDate) {
     const { data: status } = await supabase
       .from('scrape_status').select('complete').eq('date', date).maybeSingle();
     if (status?.complete) {
@@ -312,14 +321,16 @@ async function main() {
 
     let grandTotal = 0;
     let scrapedCount = 0;
-    for (const date of dates) {
+    for (let i = 0; i < dates.length; i++) {
+      const date = dates[i];
       if (scrapedCount >= MAX_DATES_PER_RUN) {
         console.log(`\nReached per-run cap (${MAX_DATES_PER_RUN} dates) — remaining dates will be picked up next run.`);
         break;
       }
       console.log(`\n── ${date} ──`);
       try {
-        const count = await scrapeDate(date, halls, errors);
+        const forceThisDate = force || i < FORCE_REFRESH_DAYS;
+        const count = await scrapeDate(date, halls, errors, forceThisDate);
         if (count === null) continue; // already complete, didn't count against the cap
         scrapedCount++;
         grandTotal += count;
@@ -369,7 +380,7 @@ async function main() {
     }
 
     if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.slice(0, 30).join('\n'));
-    console.log(`\nDone! Inserted ${grandTotal} menu items across ${dates.length} days. [${new Date().toISOString()}]\n`);
+    console.log(`\nDone! Inserted ${grandTotal} menu items across ${scrapedCount} days (window: ${dates.length} days). [${new Date().toISOString()}]\n`);
   } finally {
     if (_browser) { try { await _browser.close(); } catch {} }
   }

@@ -1,15 +1,17 @@
 /**
- * Vercel Cloud Scraper — runs on Vercel cron (no Mac required).
+ * Vercel Cloud Scraper — secondary path, kept mainly as a Supabase heartbeat.
  *
- * Architecture mirrors backend-folder/run-scrape.js but uses fetch + an optional
- * ZenRows residential proxy (instead of Puppeteer) since Vercel functions can't
- * launch Chromium.
+ * apiv4.dineoncampus.com blocks datacenter IPs behind Cloudflare — confirmed against
+ * Vercel itself and against plain GitHub-hosted Actions runners (see git history on
+ * .github/workflows/daily-scrape.yml). Without a residential proxy (ZenRows or similar)
+ * this can never reach DineOnCampus from here, so if ZENROWS_KEY isn't set we skip the
+ * scrape attempt entirely rather than retry-and-fail against Cloudflare every day.
  *
- * Vercel datacenter IPs are blocked by Cloudflare for apiv4.dineoncampus.com,
- * so ZenRows is REQUIRED in production. Set ZENROWS_KEY in your Vercel env vars.
- * Free tier (1k requests/mo) is enough for ~1 daily run scraping 7 days × 3 meals.
+ * The real scraper is backend-folder/run-scrape.js, run via launchd on a Mac with a
+ * residential IP (com.nudining.scrape.plist, 8x/day). This endpoint's job is just to
+ * touch Supabase daily so the free-tier project doesn't auto-pause from inactivity.
  *
- * Endpoints used (matches new.dineoncampus.com):
+ * Endpoints used (matches new.dineoncampus.com), if ZENROWS_KEY is configured:
  *   /sites/{SITE_ID}/locations-public?for_menus=true   — hall list
  *   /locations/{id}/periods/?date={date}                — periods per date
  *   /locations/{id}/menu?date={date}&period={periodId}  — menu items
@@ -238,6 +240,17 @@ export default async function handler(req, res) {
     await supabase.from('locations').select('id').limit(1);
   } catch (e) {
     console.error('[cloud-scrape] heartbeat query failed:', e.message);
+  }
+
+  // Without a residential proxy, every request here gets Cloudflare-blocked — don't
+  // bother retrying against it daily. See file header for why.
+  if (!process.env.ZENROWS_KEY) {
+    console.log('[cloud-scrape] ZENROWS_KEY not set — skipping scrape attempt, heartbeat only.');
+    return res.json({
+      ok: true,
+      heartbeatOnly: true,
+      reason: 'ZENROWS_KEY not configured; DineOnCampus is Cloudflare-blocked from Vercel without a residential proxy. Scraping runs via backend-folder/run-scrape.js on a local Mac instead.',
+    });
   }
 
   // 1. Get hall list
