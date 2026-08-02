@@ -284,33 +284,42 @@ export default async function handler(req, res) {
     }
   }
 
-  // 3. Weekly hours for all campus locations
-  try {
-    const scheduleData = await apiGet(
-      `https://apiv4.dineoncampus.com/locations/weekly_schedule?site_id=${SITE_ID}&date=${today}`
-    );
-    let hoursCount = 0;
-    for (const loc of (scheduleData?.theLocations || [])) {
-      for (const day of (loc.week || [])) {
-        const { error: hErr } = await supabase.from('location_hours').upsert({
-          location_original_id: loc.id,
-          location_name:        loc.name,
-          location_slug:        loc.slug ?? null,
-          date:                 day.date,
-          day_of_week:          day.day,
-          status:               day.status || (day.closed ? 'closed' : 'open'),
-          hours:                day.hours || [],
-          has_special_hours:    day.has_special_hours || false,
-          always_open:          day.always_open || false,
-          scraped_at:           new Date().toISOString(),
-        }, { onConflict: 'location_original_id,date' });
-        if (!hErr) hoursCount++;
+  // 3. Weekly hours for all campus locations.
+  // weekly_schedule?date=X returns the Sun-Sat calendar week CONTAINING X, not a rolling
+  // 7-day-forward window, so today..today+6 can span two calendar weeks. Fetch both the
+  // current week and next week's date to guarantee full forward coverage.
+  const nextWeekDate = new Date();
+  nextWeekDate.setDate(nextWeekDate.getDate() + 7);
+  const scheduleDates = [today, nextWeekDate.toLocaleDateString('en-CA', { timeZone: 'America/New_York' })];
+
+  let hoursCount = 0;
+  for (const scheduleDate of scheduleDates) {
+    try {
+      const scheduleData = await apiGet(
+        `https://apiv4.dineoncampus.com/locations/weekly_schedule?site_id=${SITE_ID}&date=${scheduleDate}`
+      );
+      for (const loc of (scheduleData?.theLocations || [])) {
+        for (const day of (loc.week || [])) {
+          const { error: hErr } = await supabase.from('location_hours').upsert({
+            location_original_id: loc.id,
+            location_name:        loc.name,
+            location_slug:        loc.slug ?? null,
+            date:                 day.date,
+            day_of_week:          day.day,
+            status:               day.status || (day.closed ? 'closed' : 'open'),
+            hours:                day.hours || [],
+            has_special_hours:    day.has_special_hours || false,
+            always_open:          day.always_open || false,
+            scraped_at:           new Date().toISOString(),
+          }, { onConflict: 'location_original_id,date' });
+          if (!hErr) hoursCount++;
+        }
       }
+    } catch (e) {
+      errors.push(`weekly_schedule ${scheduleDate}: ${e.message}`);
     }
-    console.log(`[cloud-scrape] hours: ${hoursCount} location-days updated`);
-  } catch (e) {
-    errors.push(`weekly_schedule: ${e.message}`);
   }
+  console.log(`[cloud-scrape] hours: ${hoursCount} location-days updated`);
 
   await supabase.from('steast_vs_iv')
     .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });

@@ -346,38 +346,49 @@ async function main() {
       .upsert({ date: today, steast: 0, iv: 0 }, { onConflict: 'date', ignoreDuplicates: true });
 
     // ── Weekly hours for all 31 campus locations ───────────────────────────
+    // weekly_schedule?date=X returns the Sun-Sat calendar week CONTAINING X, not a
+    // rolling 7-day-forward window. today..today+6 can span two calendar weeks (e.g.
+    // if today is a Saturday, almost the whole window is in "next week"), so we fetch
+    // both the current week and next week's date to guarantee full forward coverage
+    // regardless of what day of the week "today" falls on.
     console.log('\nFetching weekly hours...');
-    try {
-      const scheduleData = await browserGet(
-        `https://apiv4.dineoncampus.com/locations/weekly_schedule?site_id=${SITE_ID}&date=${today}`
-      );
-      if (scheduleData?.theLocations?.length) {
-        let hoursCount = 0;
-        for (const loc of scheduleData.theLocations) {
-          for (const day of (loc.week || [])) {
-            const { error: hErr } = await supabase.from('location_hours').upsert({
-              location_original_id: loc.id,
-              location_name:        loc.name,
-              location_slug:        loc.slug ?? null,
-              date:                 day.date,
-              day_of_week:          day.day,
-              status:               day.status || (day.closed ? 'closed' : 'open'),
-              hours:                day.hours || [],
-              has_special_hours:    day.has_special_hours || false,
-              always_open:          day.always_open || false,
-              scraped_at:           new Date().toISOString(),
-            }, { onConflict: 'location_original_id,date' });
-            if (!hErr) hoursCount++;
-            else errors.push(`hours ${loc.name} ${day.date}: ${hErr.message}`);
+    const nextWeekDate = new Date();
+    nextWeekDate.setDate(nextWeekDate.getDate() + 7);
+    const scheduleDates = [today, nextWeekDate.toLocaleDateString('en-CA', { timeZone: 'America/New_York' })];
+
+    let hoursCount = 0;
+    for (const scheduleDate of scheduleDates) {
+      try {
+        const scheduleData = await browserGet(
+          `https://apiv4.dineoncampus.com/locations/weekly_schedule?site_id=${SITE_ID}&date=${scheduleDate}`
+        );
+        if (scheduleData?.theLocations?.length) {
+          for (const loc of scheduleData.theLocations) {
+            for (const day of (loc.week || [])) {
+              const { error: hErr } = await supabase.from('location_hours').upsert({
+                location_original_id: loc.id,
+                location_name:        loc.name,
+                location_slug:        loc.slug ?? null,
+                date:                 day.date,
+                day_of_week:          day.day,
+                status:               day.status || (day.closed ? 'closed' : 'open'),
+                hours:                day.hours || [],
+                has_special_hours:    day.has_special_hours || false,
+                always_open:          day.always_open || false,
+                scraped_at:           new Date().toISOString(),
+              }, { onConflict: 'location_original_id,date' });
+              if (!hErr) hoursCount++;
+              else errors.push(`hours ${loc.name} ${day.date}: ${hErr.message}`);
+            }
           }
+        } else {
+          console.warn(`No weekly schedule data returned for week of ${scheduleDate}.`);
         }
-        console.log(`Updated hours: ${hoursCount} location-days across ${scheduleData.theLocations.length} locations.`);
-      } else {
-        console.warn('No weekly schedule data returned.');
+      } catch (e) {
+        console.warn(`Could not fetch weekly hours for week of ${scheduleDate}:`, e.message);
       }
-    } catch (e) {
-      console.warn('Could not fetch weekly hours:', e.message);
     }
+    console.log(`Updated hours: ${hoursCount} location-days total.`);
 
     if (errors.length) console.warn(`\nErrors (${errors.length}):\n`, errors.slice(0, 30).join('\n'));
     console.log(`\nDone! Inserted ${grandTotal} menu items across ${scrapedCount} days (window: ${dates.length} days). [${new Date().toISOString()}]\n`);
